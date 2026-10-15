@@ -4,3 +4,8 @@ delete half: sqlite 1000000 rows in 1.34 s, file still 281 MB (freelist pages, n
 reclaim, sqlite VACUUM: 0.52 s, file 143 MB after | concurrent writer: 30961 inserts in 1.1 s, worst stall 0.429 s, busy errors 0
 reclaim, ours snapshot: 0.25 s, snapshot 229 MB + log 80 MB after (1310343 rows, 1 old segments deleted) | concurrent writer: 821855 inserts in 0.9 s, worst stall 0.108 ms
 row counts after: sqlite 1030961, ours Int(1821855)
+-- churn: 1M live rows, 3M insert+delete pairs --
+sqlite churn: 614.1 s (204.70 us per pair) | file 145 MB, 172 free pages
+sqlite churn auto_vacuum=FULL: 636.7 s (212.23 us per pair) | file 145 MB, 0 free pages
+ours churn: 3M insert+delete pairs in 3.8 s (1.28 us per pair) | live rows 1000000, slots allocated 1000001 (free list 1), rss 301 -> 647 MB, log written 443 MB
+ours churn: snapshot after churn 167 MB in 4.04 s, 1 segments deleted

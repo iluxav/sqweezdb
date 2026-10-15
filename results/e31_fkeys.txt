@@ -1,0 +1,15 @@
+=== E31: foreign keys enforced by default (1M users, 1M orders) ===
+insert 1M orders, 1000-row txns: sqlite FK off 9.40 us/row | sqlite FK on 10.28 us/row | ours (always on) 0.83 us/row
+orphan insert (user 999999999 does not exist):
+  sqlite off: 1 affected
+  sqlite on:  ERROR: FOREIGN KEY constraint failed
+  ours:       ERROR: foreign key violation: orders.user_id = 999999999 has no row in users.id
+delete user 7 who has an invoice (RESTRICT):
+  sqlite off: 1 affected (invoice now orphaned)
+  sqlite on:  ERROR: FOREIGN KEY constraint failed
+  ours:       ERROR: delete from users blocked: 1 row(s) in invoices.user_id reference id = 7
+delete user 9 who has a payment (SET NULL) -> payment.user_id: sqlite off 9 / sqlite on NULL / ours NULL
+delete 10k users with ~10k orders (CASCADE): sqlite off 2 ms, orphans left 9998 | sqlite on 148 ms, orphans 0 | ours 13 ms (autocommit each), orphans 0
+concurrent 2 s, 8 inserters + 1 cascading deleter: sqlite on: 64363 orders inserted, 11002 users deleted, 773 inserts refused (parent gone) -> orphans 0
+concurrent 2 s, 8 inserters + 1 cascading deleter: ours:      2591708 orders inserted, 158514 users deleted, 799667 inserts refused (parent gone) -> orphans 0
+after ALTER TABLE users ADD COLUMN: orphan insert -> ERROR: foreign key violation: orders.user_id = 999999999 has no row in users.id | valid insert -> ok | delete user 8 (has invoice) -> ERROR: delete from users blocked: 1 row(s) in invoices.user_id reference id = 8

@@ -1,0 +1,10 @@
+=== E26: live backup, point-in-time restore, follower replica (2M rows) ===
+start: ours snapshot 333 MB; sqlite 281 MB
+sqlite backup while writing: backup API (one step) 0.31 s -> 283 MB; VACUUM INTO 0.42 s -> 279 MB | writer: 44950 inserts, worst stall 58.7 ms, busy errors 0
+ours backup while writing: copy snapshot + log 0.00 s -> 360 MB | writer: 339647 inserts, worst stall 2.255 ms
+point-in-time restore: Int(1194827) rows deleted by mistake at seq 391648+1; live db now 1244820 rows; backup 418 MB | restore to seq 391648: 0.81 s (replayed 389647 records), restored db has 2389647 rows vs 2389647 at that point -> EXACT | sqlite: not available without an external tool
+writer alone (no follower): 874896 inserts/s for 2 s
+follower opened on the primary's directory: caught up in 0.000 s, 2994612 rows on both sides -> EXACT
+writer with follower attached: 828152 inserts/s for 2 s; follower was 860 records behind at the end, drained in 0.001 s
+replication lag, commit on primary -> row visible on follower: p50 204 us, p99 1684 us, max 22270 us | sqlite: no follower without LiteFS
+follower serving reads while the primary writes: 1.82M reads/s on one thread, primary 848443 inserts/s meanwhile

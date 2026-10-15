@@ -21,8 +21,9 @@ impl std::fmt::Debug for Expr { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -
 pub struct JoinStep { pub build: Arc<Table>, pub build_key: usize, pub key_vidx: usize, pub build_preds: Vec<Pred>, pub build_cols: Vec<usize>, pub base: usize, pub vbase: usize, pub build_access: Access }
 pub struct JoinPlan { pub probe: Arc<Table>, pub probe_access: Access, pub probe_preds: Vec<Pred>, pub steps: Vec<JoinStep>, pub index_first: Option<Arc<SecIndex>> }
 pub struct SelectPlan { pub table: Arc<Table>, pub schema: Schema, pub access: Access, pub preds: Vec<Pred>, pub proj: Vec<Proj>, pub group_by: Option<usize>, pub order: Option<(usize, bool)>, pub limit: Option<usize>, pub join: Option<JoinPlan>, pub corr: Option<(usize, usize)>, pub subs: Vec<(Arc<SelectPlan>, Option<usize>)> }
-pub enum Plan { CreateTable(Schema), Insert { table: Arc<Table>, exprs: Vec<Expr> }, Select(SelectPlan), Update { table: Arc<Table>, sets: Vec<(usize, Expr)>, pk: Expr }, Delete { table: Arc<Table>, access: Access, preds: Vec<Pred> }, Begin, Commit, Rollback }
-pub struct Prepared { pub plan: Plan, pub nparams: usize, pub text: String }
+pub enum Plan { CreateTable(Schema), Insert { table: Arc<Table>, exprs: Vec<Expr> }, Select(SelectPlan), Update { table: Arc<Table>, sets: Vec<(usize, Expr)>, pk: Expr }, Delete { table: Arc<Table>, access: Access, preds: Vec<Pred> }, Begin, Commit, Rollback, Alter { table: String, ops: Vec<AlterOp> } }
+#[derive(Clone, Debug)] pub enum AlterOp { Add { col: Column, default: Value }, Drop(String), Rename(String, String), SetType(String, ColType), SetNotNull(String), DropNotNull(String) }
+pub struct Prepared { pub plan: Plan, pub nparams: usize, pub text: String, pub epoch: u64 }
 #[derive(Default)] pub struct Session { pub txn: Option<Txn>, pub user: Option<String>, pub roles: Vec<String>, pub attrs: HashMap<String, Value> }
 
 // ---------- access control: roles, users, table grants, row policies ----------
@@ -55,6 +56,14 @@ fn priv_of(t: &str) -> Result<u8, String> { match t.to_uppercase().as_str() { "S
 fn is_admin_stmt(sql: &str) -> bool { let u = sql.trim_start().to_uppercase(); u.starts_with("CREATE ROLE ") || u.starts_with("CREATE USER ") || u.starts_with("GRANT ") || u.starts_with("CREATE POLICY ") || u.starts_with("CREATE INDEX ") }
 
 fn obj_name(n: &ObjectName) -> String { n.0.iter().map(|p| match p { ObjectNamePart::Identifier(i) => i.value.clone(), other => format!("{other}") }).collect::<Vec<_>>().join(".") }
+fn default_value(e: &ast::Expr) -> Result<Value, String> {
+    match e {
+        ast::Expr::Value(v) => match &v.value { ast::Value::Number(s, _) => Ok(if let Ok(i) = s.parse::<i64>() { Value::Int(i) } else { Value::Float(s.parse::<f64>().map_err(|e| e.to_string())?) }), ast::Value::SingleQuotedString(s) => Ok(Value::Text(s.clone())), ast::Value::Boolean(b) => Ok(Value::Bool(*b)), ast::Value::Null => Ok(Value::Null), other => Err(format!("unsupported default {other}")) },
+        ast::Expr::UnaryOp { op: UnaryOperator::Minus, expr } => match default_value(expr)? { Value::Int(i) => Ok(Value::Int(-i)), Value::Float(f) => Ok(Value::Float(-f)), v => Err(format!("bad default {v:?}")) },
+        ast::Expr::Identifier(i) => literal_tok(&i.value),
+        other => Err(format!("unsupported default {other}")),
+    }
+}
 fn coltype_of(dt: &ast::DataType) -> Result<ColType, String> {
     let s = format!("{dt}").to_uppercase();
     let num = |s: &str| s.split(|c| c == '(' || c == ')').nth(1).and_then(|x| x.trim().parse::<usize>().ok());
@@ -124,13 +133,17 @@ impl<'a> Planner<'a> {
     fn plan(&mut self, st: &Statement) -> Result<Plan, String> {
         match st {
             Statement::CreateTable(ct) => {
-                let mut cols = vec![]; let mut pk = None; let mut unique = None;
+                let mut cols = vec![]; let mut pk = None; let mut unique = None; let mut fks: Vec<FkDef> = vec![];
+                let action = |a: &Option<ast::ReferentialAction>| -> Result<FkAction, String> { match a { None | Some(ast::ReferentialAction::NoAction) | Some(ast::ReferentialAction::Restrict) => Ok(FkAction::Restrict), Some(ast::ReferentialAction::Cascade) => Ok(FkAction::Cascade), Some(ast::ReferentialAction::SetNull) => Ok(FkAction::SetNull), Some(other) => Err(format!("unsupported referential action {other}")) } };
                 for (i, c) in ct.columns.iter().enumerate() {
                     let mut nullable = true;
-                    for o in &c.options { let s = format!("{}", o.option).to_uppercase(); if s.starts_with("PRIMARY KEY") { pk = Some(i); nullable = false; } else if s.starts_with("UNIQUE") { unique = Some(i); } else if s.starts_with("NOT NULL") { nullable = false; } }
-                    cols.push(Column { name: c.name.value.clone(), ty: coltype_of(&c.data_type)?, nullable });
+                    let mut default = Value::Null;
+                    for o in &c.options { let s = format!("{}", o.option).to_uppercase(); if let ast::ColumnOption::ForeignKey(fk) = &o.option { fks.push(FkDef { col: i, parent: obj_name(&fk.foreign_table), on_delete: action(&fk.on_delete)? }); } else if s.starts_with("PRIMARY KEY") { pk = Some(i); nullable = false; } else if s.starts_with("UNIQUE") { unique = Some(i); } else if s.starts_with("NOT NULL") { nullable = false; } else if let ast::ColumnOption::Default(e) = &o.option { default = default_value(e)?; } }
+                    cols.push(Column { name: c.name.value.clone(), ty: coltype_of(&c.data_type)?, nullable, default });
                 }
-                Ok(Plan::CreateTable(Schema::new(&obj_name(&ct.name), cols, pk.ok_or("a PRIMARY KEY column is required")?, unique)?))
+                for tc in &ct.constraints { if let ast::TableConstraint::ForeignKey(fk) = tc { if fk.columns.len() != 1 { return Err("one column per foreign key (for now)".into()); } let col = cols.iter().position(|c| c.name.eq_ignore_ascii_case(&fk.columns[0].value)).ok_or(format!("unknown column {}", fk.columns[0].value))?; fks.push(FkDef { col, parent: obj_name(&fk.foreign_table), on_delete: action(&fk.on_delete)? }); } }
+                let mut schema = Schema::new(&obj_name(&ct.name), cols, pk.ok_or("a PRIMARY KEY column is required")?, unique)?; schema.fks = fks;
+                Ok(Plan::CreateTable(schema))
             }
             Statement::Insert(ins) => {
                 let name = match &ins.table { TableObject::TableName(n) => obj_name(n), other => return Err(format!("unsupported insert target {other}")) };
@@ -140,7 +153,7 @@ impl<'a> Planner<'a> {
                 let mut exprs: Vec<Option<Expr>> = vec![None; table.schema.columns.len()];
                 if ins.columns.is_empty() { if row.len() != exprs.len() { return Err(format!("expected {} values", exprs.len())); } for (i, e) in row.iter().enumerate() { exprs[i] = Some(self.expr(e)?); } }
                 else { for (c, e) in ins.columns.iter().zip(row) { let n = obj_name(c); let i = table.schema.col(&n).ok_or(format!("no such column {n}"))?; exprs[i] = Some(self.expr(e)?); } }
-                let exprs = exprs.into_iter().enumerate().map(|(i, e)| e.ok_or(format!("column {} has no value (NULLs are not supported)", table.schema.columns[i].name))).collect::<Result<Vec<_>, _>>()?;
+                let exprs = exprs.into_iter().enumerate().map(|(i, e)| { let c = &table.schema.columns[i]; match e { Some(e) => Ok(e), None if c.default != Value::Null => Ok(Expr::Lit(c.default.clone())), None if c.nullable => Ok(Expr::Lit(Value::Null)), None => Err(format!("column {} has no value and no default", c.name)) } }).collect::<Result<Vec<_>, _>>()?;
                 Ok(Plan::Insert { table, exprs })
             }
             Statement::Query(q) => self.plan_query(q),
@@ -154,6 +167,19 @@ impl<'a> Planner<'a> {
                 if let Some(w) = &u.selection { let mut cj = vec![]; conjuncts(w, &mut cj); for c in cj { self.classify(&srcs, c, &mut preds, &mut vec![])?; } }
                 if preds[0].len() != 1 || preds[0][0].col != schema.pk || preds[0][0].cmp != Cmp::Eq { return Err("UPDATE needs WHERE <primary key> = <value> (for now)".into()); }
                 Ok(Plan::Update { table, sets, pk: preds[0].pop().unwrap().rhs })
+            }
+            Statement::AlterTable(at) => {
+                let mut ops = vec![];
+                for op in &at.operations {
+                    ops.push(match op {
+                        ast::AlterTableOperation::AddColumn { column_def: c, .. } => { let mut nullable = true; let mut default = Value::Null; for o in &c.options { match &o.option { ast::ColumnOption::NotNull => nullable = false, ast::ColumnOption::Default(e) => default = default_value(e)?, ast::ColumnOption::Null => nullable = true, other => return Err(format!("unsupported column option {other}")) } } if !nullable && default == Value::Null { return Err(format!("column {} is NOT NULL and needs a DEFAULT for existing rows", c.name.value)); } AlterOp::Add { col: Column { name: c.name.value.clone(), ty: coltype_of(&c.data_type)?, nullable, default: default.clone() }, default } }
+                        ast::AlterTableOperation::DropColumn { column_names, .. } => { if column_names.len() != 1 { return Err("drop one column at a time".into()); } AlterOp::Drop(column_names[0].value.clone()) }
+                        ast::AlterTableOperation::RenameColumn { old_column_name, new_column_name } => AlterOp::Rename(old_column_name.value.clone(), new_column_name.value.clone()),
+                        ast::AlterTableOperation::AlterColumn { column_name, op } => match op { ast::AlterColumnOperation::SetNotNull => AlterOp::SetNotNull(column_name.value.clone()), ast::AlterColumnOperation::DropNotNull => AlterOp::DropNotNull(column_name.value.clone()), ast::AlterColumnOperation::SetDataType { data_type, .. } => AlterOp::SetType(column_name.value.clone(), coltype_of(data_type)?), other => return Err(format!("unsupported ALTER COLUMN {other}")) },
+                        other => return Err(format!("unsupported ALTER TABLE operation {other}")),
+                    });
+                }
+                Ok(Plan::Alter { table: obj_name(&at.name), ops })
             }
             Statement::StartTransaction { .. } => Ok(Plan::Begin),
             Statement::Commit { .. } => Ok(Plan::Commit),
@@ -284,6 +310,8 @@ impl<'a> Planner<'a> {
             }
         }
         let group_by = match &sel.group_by { GroupByExpr::Expressions(v, _) if !v.is_empty() => { if v.len() > 1 { return Err("one GROUP BY column only".into()); } let (s, c) = jcol(&srcs, &v[0])?.ok_or("unknown GROUP BY column")?; Some(vidx(s, c)) }, _ => None };
+        // no "bare" columns: with an aggregate or a GROUP BY, every plain column must be the grouping column (SQLite picks an arbitrary row instead; E29)
+        if group_by.is_some() || proj.iter().any(|p| matches!(p, Proj::Agg(_))) { for p in &proj { if let Proj::Col(v) = p { if Some(*v) != group_by { return Err("every selected column must appear in GROUP BY or inside an aggregate".into()); } } } }
         let mut order_by = None;
         if let Some(ob) = &q.order_by { if let OrderByKind::Expressions(v) = &ob.kind { if let Some(o) = v.first() { let (s, c) = jcol(&srcs, &o.expr)?.ok_or("ORDER BY must name a column")?; let vi = vidx(s, c); let idx = proj.iter().position(|p| matches!(p, Proj::Col(x) if *x == vi)).ok_or("ORDER BY column must be selected")?; order_by = Some((idx, format!("{}", o.options).to_uppercase().contains("DESC"))); } } }
         let limit = match &q.limit_clause { Some(LimitClause::LimitOffset { limit: Some(e), .. }) => match self.expr(e)? { Expr::Lit(Value::Int(n)) => Some(n as usize), _ => return Err("LIMIT must be a number".into()) }, _ => None };
@@ -307,7 +335,7 @@ impl<'a> Planner<'a> {
             let mut off = vn + ps.row_size; let mut vbase = ncols_probe;
             for (k, &(bs, bcol, _, _)) in step_specs.iter().enumerate() {
                 let bsch = &srcs[bs].table.schema; let base = off;
-                for &c in &step_cols[k] { schema.columns.push(Column { name: format!("{}.{}", srcs[bs].alias, bsch.columns[c].name), ty: bsch.columns[c].ty.clone(), nullable: bsch.columns[c].nullable }); schema.offsets.push(off); off += bsch.columns[c].ty.width(); }
+                for &c in &step_cols[k] { schema.columns.push(Column { name: format!("{}.{}", srcs[bs].alias, bsch.columns[c].name), ty: bsch.columns[c].ty.clone(), nullable: bsch.columns[c].nullable, default: Value::Null }); schema.offsets.push(off); off += bsch.columns[c].ty.width(); }
                 let mut build_preds = std::mem::take(&mut side_preds[bs]);
                 let build_access = access_path(&srcs[bs].table, &mut build_preds);
                 steps.push(JoinStep { build: srcs[bs].table.clone(), build_key: bcol, key_vidx: key_vidx[k], build_preds, build_cols: step_cols[k].clone(), base, vbase, build_access });
@@ -507,9 +535,104 @@ impl<'a> Sink<'a> {
     }
 }
 
-pub struct Sql { pub db: Arc<Database>, cache: Mutex<HashMap<String, Arc<Prepared>>>, pub acl: std::sync::RwLock<Acl> }
+pub struct Sql { pub db: Arc<Database>, cache: Arc<Mutex<HashMap<String, Arc<Prepared>>>>, pub acl: std::sync::RwLock<Acl>, pub epoch: Arc<std::sync::atomic::AtomicU64>, alters: Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>> }
+/// One committed change, decoded against the table's schema.
+#[derive(Debug, Clone, PartialEq)] pub enum ChangeOp { Insert, Update, Delete }
+#[derive(Debug, Clone)] pub struct Change { pub seq: u64, pub table: String, pub op: ChangeOp, pub pk: i64, pub row: Option<Vec<Value>> }
+/// A change feed: tails the log and decodes records into `Change`s. Records written to a table that no longer owns its
+/// name (a shadow during a schema change, a retired table after one) are skipped, so one logical change is one event.
+pub struct Feed { cursor: LogCursor, db: Arc<Database>, last: u64, on_ring: bool }
+impl Drop for Feed { fn drop(&mut self) { self.db.log.feeds.fetch_sub(1, std::sync::atomic::Ordering::Relaxed); } }
+impl Feed {
+    pub fn last_seq(&self) -> u64 { self.last }
+    fn decode(&self, seq: u64, tid: u16, op: u8, payload: &[u8], out: &mut Vec<Change>) {
+        let Some(t) = self.db.table_by_id(tid) else { return };
+        let (since, until) = (t.owner_since.load(std::sync::atomic::Ordering::Relaxed), t.owner_until.load(std::sync::atomic::Ordering::Relaxed));
+        if seq < since || seq >= until { return; }  // written to a shadow before it took the name, or to a retired table after
+        match op {
+            OP_DELETE => { let pk = if payload.len() == 8 { i64::from_le_bytes(payload.try_into().unwrap()) } else { t.pk_of(payload) }; out.push(Change { seq, table: t.schema.name.clone(), op: ChangeOp::Delete, pk, row: None }); }
+            OP_INSERT | OP_UPDATE => { if payload.len() != t.schema.row_size { return; } let row: Vec<Value> = (0..t.schema.columns.len()).map(|i| decode_col(&t.schema, payload, i)).collect(); out.push(Change { seq, table: t.schema.name.clone(), op: if op == OP_INSERT { ChangeOp::Insert } else { ChangeOp::Update }, pk: t.pk_of(payload), row: Some(row) }); }
+            _ => {}
+        }
+    }
+    /// New changes since the last poll (empty if none yet). In-process: served from the log's memory ring the moment a
+    /// record is committed (durable mode: once it is durable); the files are read only to catch up after a gap.
+    pub fn poll(&mut self) -> Vec<Change> {
+        let durable_only = self.db.durable;
+        let (ring, ok) = self.db.log.recent_after(self.last, durable_only);
+        let recs: Vec<(u64, u8, u16, Vec<u8>)> = if ok { self.on_ring = true; ring.into_iter().map(|(a, b, c, p)| (a, b, c, p.to_vec())).collect() }
+            else { if self.on_ring { self.cursor = LogCursor::new(&self.db.dir, self.last); self.on_ring = false; } let upto = if durable_only { self.db.log.st.lock().unwrap().durable } else { u64::MAX }; self.cursor.poll_upto(upto) };
+        let mut out = vec![];
+        for (seq, op, tid, payload) in recs {
+            self.last = self.last.max(seq);
+            match op {
+                OP_TXN => { let mut p = 0; while p + 7 <= payload.len() { let t2 = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap()); let op2 = payload[p + 2]; let len = u32::from_le_bytes(payload[p + 3..p + 7].try_into().unwrap()) as usize; p += 7; self.decode(seq, t2, op2, &payload[p..p + len], &mut out); p += len; } }
+                OP_META => {}
+                _ => self.decode(seq, tid, op, &payload, &mut out),
+            }
+        }
+        out
+    }
+}
+/// Handle on a follower's replication thread.
+pub struct Follower { pub applied: Arc<std::sync::atomic::AtomicU64>, stop: Arc<std::sync::atomic::AtomicBool>, thread: Option<std::thread::JoinHandle<()>> }
+impl Follower { pub fn applied(&self) -> u64 { self.applied.load(std::sync::atomic::Ordering::Acquire) } }
+impl Drop for Follower { fn drop(&mut self) { self.stop.store(true, std::sync::atomic::Ordering::Relaxed); if let Some(h) = self.thread.take() { h.join().ok(); } } }
 impl Sql {
-    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Mutex::new(HashMap::new()), acl: std::sync::RwLock::new(Acl::default()) } }
+    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Arc::new(Mutex::new(HashMap::new())), acl: std::sync::RwLock::new(Acl::default()), epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)), alters: Mutex::new(vec![]) } }
+    /// Build the new schema and the old-row -> new-row converter for a list of ALTER operations.
+    fn alter_schema(old: &Schema, ops: &[AlterOp]) -> Result<(Schema, Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>), String> {
+        // working list: (column, source: Some(old index) | None, default, retyped from old type)
+        let mut cols: Vec<(Column, Option<usize>, Value)> = old.columns.iter().enumerate().map(|(i, c)| (c.clone(), Some(i), Value::Null)).collect();
+        let find = |cols: &Vec<(Column, Option<usize>, Value)>, n: &str| cols.iter().position(|(c, _, _)| c.name.eq_ignore_ascii_case(n)).ok_or(format!("no such column {n}"));
+        let pk_name = old.columns[old.pk].name.clone(); let uniq_name = old.unique.map(|u| old.columns[u].name.clone());
+        for op in ops {
+            match op {
+                AlterOp::Add { col, default } => { if find(&cols, &col.name).is_ok() { return Err(format!("column {} already exists", col.name)); } cols.push((col.clone(), None, default.clone())); }
+                AlterOp::Drop(n) => { let i = find(&cols, n)?; if cols[i].0.name.eq_ignore_ascii_case(&pk_name) { return Err("cannot drop the primary key".into()); } cols.remove(i); }
+                AlterOp::Rename(a, b) => { let i = find(&cols, a)?; if find(&cols, b).is_ok() { return Err(format!("column {b} already exists")); } cols[i].0.name = b.clone(); }
+                AlterOp::SetType(n, ty) => { let i = find(&cols, n)?; if cols[i].0.name.eq_ignore_ascii_case(&pk_name) { return Err("cannot change the primary key type".into()); } cols[i].0.ty = ty.clone(); }
+                AlterOp::SetNotNull(n) => { let i = find(&cols, n)?; cols[i].0.nullable = false; }
+                AlterOp::DropNotNull(n) => { let i = find(&cols, n)?; cols[i].0.nullable = true; }
+            }
+        }
+        let pk = cols.iter().position(|(c, _, _)| c.name.eq_ignore_ascii_case(&pk_name)).ok_or("primary key lost")?;
+        let unique = uniq_name.and_then(|u| cols.iter().position(|(c, _, _)| c.name.eq_ignore_ascii_case(&u)));
+        let mut schema = Schema::new(&old.name, cols.iter().map(|(c, _, _)| c.clone()).collect(), pk, unique)?;
+        schema.fks = old.fks.iter().filter_map(|f| cols.iter().position(|(_, src, _)| *src == Some(f.col)).map(|col| FkDef { col, parent: f.parent.clone(), on_delete: f.on_delete.clone() })).collect();
+        let (old_s, new_s) = (old.clone(), schema.clone()); let srcs: Vec<(Option<usize>, Value)> = cols.iter().map(|(_, s, d)| (*s, d.clone())).collect();
+        let convert = Arc::new(move |row: &[u8]| -> Result<Vec<u8>, String> {
+            let vals: Vec<Value> = srcs.iter().enumerate().map(|(i, (src, dflt))| match src { Some(j) => { let v = decode_col(&old_s, row, *j); if v == Value::Null && !new_s.columns[i].nullable { Value::Null } else { v } } None => dflt.clone() }).collect();
+            encode_row(&new_s, &vals).map_err(|e| format!("row with key {} cannot be converted: {e}", read_i64(row, old_s.offsets[old_s.pk])))
+        });
+        Ok((schema, convert))
+    }
+    /// Online ALTER TABLE: shadow table, mirrored writes, background copy, swap. Returns as soon as the shadow exists;
+    /// `wait_alters` blocks until the copy and the swap are done.
+    fn alter(&self, text: &str, table: &str, ops: &[AlterOp], log: bool) -> Result<(), String> {
+        let old = self.db.table(table).ok_or(format!("no such table {table}"))?;
+        let (schema, convert) = Self::alter_schema(&old.schema, ops)?;
+        self.db.alter_start(table, schema, convert)?;
+        if log { self.log_meta(text); }
+        self.spawn_copy(table.to_string());
+        Ok(())
+    }
+    fn spawn_copy(&self, table: String) {
+        let (db, cache, epoch) = (self.db.clone(), self.cache.clone(), self.epoch.clone());
+        let h = std::thread::spawn(move || {
+            let meta = |text: &str| { let seq = db.log.append_meta(text); if db.durable { db.log.wait_durable(seq); } };
+            let old = db.table(&table).ok_or("table vanished")?;
+            let sh = old.shadow.read().unwrap().clone().ok_or("no shadow")?;
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            match old.copy_into_shadow(&sh, &stop) {
+                Ok(_) => { let old = db.alter_finish(&table)?; meta(&format!("ALTER TABLE {table} DONE")); cache.lock().unwrap().clear(); epoch.fetch_add(1, std::sync::atomic::Ordering::Release); std::thread::sleep(std::time::Duration::from_secs(1)); old.clear(); Ok(()) }  // grace period: statements planned before the swap drain on the old table, still mirrored
+                Err(e) => { db.alter_abort(&table)?; meta(&format!("ALTER TABLE {table} ABORT")); Err(e) }
+            }
+        });
+        self.alters.lock().unwrap().push(h);
+    }
+    /// Wait for every background schema change; returns the first error, if any.
+    pub fn wait_alters(&self) -> Result<(), String> { let hs: Vec<_> = self.alters.lock().unwrap().drain(..).collect(); let mut r = Ok(()); for h in hs { if let Err(e) = h.join().map_err(|_| "alter thread panicked".to_string())? { r = Err(e); } } r }
     /// Create a fresh database directory and start it.
     pub fn create(dir: &std::path::Path, durable: bool) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start(); Sql::new(db) }
     /// Open an existing database: replay the snapshot catalog + rows, then the log tail, then start the committer.
@@ -520,14 +643,66 @@ impl Sql {
         db.start();
         Ok((sql, st))
     }
+    /// Like `open`, and resumes any schema change that was interrupted (its shadow exists, no DONE/ABORT logged).
+    pub fn open_resume(dir: &std::path::Path, durable: bool, threads: usize) -> Result<(Sql, RecStats, usize), String> {
+        let (sql, st) = Sql::open(dir, durable, threads)?;
+        let pending = sql.db.tables_with_shadow(); let n = pending.len();
+        for (name, _) in pending { sql.spawn_copy(name); }
+        Ok((sql, st, n))
+    }
     pub fn snapshot(&self) -> SnapStats { self.db.snapshot() }
+    /// Open as a follower of another database directory: map its snapshot, replay its log, then keep applying new
+    /// records as the owner commits them. Never writes to that directory and never starts a committer. Reads are
+    /// ordinary SQL; `applied` is the last sequence seen.
+    pub fn follow(dir: &std::path::Path, poll: std::time::Duration) -> Result<(Arc<Sql>, Follower), String> {
+        let db = Arc::new(Database::open(dir, false));
+        let sql = Arc::new(Sql::new(db.clone()));
+        let st = db.recover(1, &mut |text| sql.apply_meta(text))?;
+        let applied = Arc::new(std::sync::atomic::AtomicU64::new(db.log.st.lock().unwrap().seq)); let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (db2, applied2, stop2, dir2, sql2) = (db.clone(), applied.clone(), stop.clone(), dir.to_path_buf(), sql.clone());
+        let h = std::thread::spawn(move || {
+            let mut cur = LogCursor::new(&dir2, applied2.load(std::sync::atomic::Ordering::Relaxed));
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                let recs = cur.poll();
+                if recs.is_empty() { std::thread::sleep(poll); continue; }
+                for (seq, op, table, payload) in recs { if let Err(e) = db2.apply_record(seq, op, table, &payload, &mut |t| sql2.apply_meta(t)) { eprintln!("follower: {e}"); } applied2.store(seq, std::sync::atomic::Ordering::Release); }
+            }
+        });
+        let _ = st;
+        Ok((sql, Follower { applied, stop, thread: Some(h) }))
+    }
+    /// Subscribe to committed changes after `after_seq` (0 = everything still in the log). Resumable: keep `Feed::last_seq`.
+    pub fn subscribe(&self, after_seq: u64) -> Feed { self.db.log.feeds.fetch_add(1, std::sync::atomic::Ordering::Relaxed); Feed { cursor: LogCursor::new(&self.db.dir, after_seq), db: self.db.clone(), last: after_seq, on_ring: false } }
+    pub fn current_seq(&self) -> u64 { self.db.log.st.lock().unwrap().seq }
+    /// Copy the snapshot and the log segments to another directory (a consistent backup as long as no snapshot runs meanwhile).
+    pub fn backup(&self, dest: &std::path::Path) -> Result<u64, String> {
+        std::fs::create_dir_all(dest).map_err(|e| e.to_string())?; let mut bytes = 0;
+        for e in std::fs::read_dir(&self.db.dir).map_err(|e| e.to_string())?.flatten() { let n = e.file_name(); let n = n.to_string_lossy(); if n == "snap" || n.starts_with("log.") { bytes += std::fs::copy(e.path(), dest.join(&*n)).map_err(|e| e.to_string())?; } }
+        Ok(bytes)
+    }
+    /// Restore a backup directory to the state just after log sequence `upto`, writing a fresh snapshot there.
+    pub fn restore(src: &std::path::Path, dest: &std::path::Path, upto: u64, threads: usize) -> Result<(Sql, RecStats), String> {
+        let _ = std::fs::remove_dir_all(dest); std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+        for e in std::fs::read_dir(src).map_err(|e| e.to_string())?.flatten() { let n = e.file_name(); let n = n.to_string_lossy(); if n == "snap" || n.starts_with("log.") { std::fs::copy(e.path(), dest.join(&*n)).map_err(|e| e.to_string())?; } }
+        let db = Arc::new(Database::open(dest, false));
+        let sql = Sql::new(db.clone());
+        let st = db.recover_upto(threads, &mut |text| sql.apply_meta(text), upto)?;
+        // drop the log tail beyond `upto`: a fresh snapshot makes the restored state self-contained
+        db.start(); sql.snapshot();
+        Ok((sql, st))
+    }
     /// Execute a catalog statement (DDL or ACL) without logging it.
     fn apply_meta(&self, text: &str) -> Result<(), String> {
         let app = Session::default();
         if is_admin_stmt(text) { return self.admin(&app, text); }
+        let u = text.trim().to_uppercase();
+        if u.starts_with("ALTER TABLE ") && (u.ends_with(" DONE") || u.ends_with(" ABORT")) { let name = text.trim().split_whitespace().nth(2).unwrap_or(""); return if u.ends_with(" DONE") { self.db.alter_finish(name).map(|old| old.clear()) } else { self.db.alter_abort(name) }; }
         let stmts = Parser::parse_sql(&GenericDialect {}, text).map_err(|e| e.to_string())?;
         let mut pl = Planner { db: &self.db, nparams: 0, outer: vec![], cur: vec![], corr: None, exists_mode: false };
-        match pl.plan(&stmts[0])? { Plan::CreateTable(s) => { self.db.create_table(s)?; Ok(()) } _ => Err(format!("not a catalog statement: {text}")) }
+        match pl.plan(&stmts[0])? {
+            Plan::CreateTable(s) => { self.db.create_table(s)?; Ok(()) }
+            Plan::Alter { table, ops } => { let old = self.db.table(&table).ok_or(format!("no such table {table}"))?; let (schema, convert) = Self::alter_schema(&old.schema, &ops)?; self.db.alter_start(&table, schema, convert)?; Ok(()) }  // the copy resumes in open_arc
+            _ => Err(format!("not a catalog statement: {text}")) }
     }
     fn log_meta(&self, text: &str) { let seq = self.db.log.append_meta(text); if self.db.durable { self.db.log.wait_durable(seq); } }
     /// Bind a session to a named user (roles and attributes are copied in). A session without a user is the embedding
@@ -618,8 +793,8 @@ impl Sql {
         if stmts.len() != 1 { return Err("one statement at a time".into()); }
         let mut pl = Planner { db: &self.db, nparams: 0, outer: vec![], cur: vec![], corr: None, exists_mode: false };
         let plan = pl.plan(&stmts[0])?;
-        let p = Arc::new(Prepared { plan, nparams: pl.nparams, text: sql.to_string() });
-        if !matches!(p.plan, Plan::CreateTable(_) | Plan::Begin | Plan::Commit | Plan::Rollback) { self.cache.lock().unwrap().insert(sql.to_string(), p.clone()); }
+        let p = Arc::new(Prepared { plan, nparams: pl.nparams, text: sql.to_string(), epoch: self.epoch.load(std::sync::atomic::Ordering::Acquire) });
+        if !matches!(p.plan, Plan::CreateTable(_) | Plan::Begin | Plan::Commit | Plan::Rollback | Plan::Alter { .. }) { self.cache.lock().unwrap().insert(sql.to_string(), p.clone()); }
         Ok(p)
     }
     pub fn exec(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>, String> { let p = self.prepare(sql)?; self.execute(&p, params) }
@@ -677,17 +852,19 @@ impl Sql {
 
     pub fn execute_s(&self, sess: &mut Session, p: &Prepared, params: &[Value]) -> Result<Vec<Vec<Value>>, String> {
         if params.len() < p.nparams { return Err(format!("statement needs {} parameters, got {}", p.nparams, params.len())); }
+        if p.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire) { let p2 = self.prepare(&p.text)?; return self.execute_s(sess, &p2, params); }  // a schema change swapped the table under this plan
         match &p.plan {
+            Plan::Alter { table, ops } => { if sess.user.is_some() { return Err("permission denied: only the application session can alter tables".into()); } self.alter(&p.text, table, ops, true)?; Ok(vec![]) }
             Plan::CreateTable(s) => { if sess.user.is_some() { return Err("permission denied: only the application session can create tables".into()); } self.db.create_table(s.clone())?; self.log_meta(&p.text); Ok(vec![]) }
             Plan::Begin => { if sess.txn.is_some() { return Err("already in a transaction".into()); } sess.txn = Some(Txn::new()); Ok(vec![]) }
             Plan::Rollback => { sess.txn = None; Ok(vec![]) }
-            Plan::Commit => { let t = sess.txn.take().ok_or("not in a transaction")?; self.db.commit(t).map_err(|a| format!("{a:?}"))?; Ok(vec![]) }
+            Plan::Commit => { let t = sess.txn.take().ok_or("not in a transaction")?; self.db.commit(t).map_err(|a| a.to_string())?; Ok(vec![]) }
             Plan::Insert { table, exprs } => {
                 let policy = self.guard(sess, table, P_INSERT)?;
                 let vals = exprs.iter().map(|e| self.resolve(sess, e, params)).collect::<Result<Vec<_>, _>>()?;
                 let row = encode_row(&table.schema, &vals)?;
                 for p in &policy { if !p.eval(&row) { return Err(format!("permission denied: row violates a policy on {}", table.schema.name)); } }
-                match &mut sess.txn { Some(t) => table.txn_insert(t, &row), None => table.insert(&row).map(|_| ()) }.map_err(|a| format!("{a:?}"))?; Ok(vec![])
+                match &mut sess.txn { Some(t) => table.txn_insert(t, &row), None => table.insert(&row).map(|_| ()) }.map_err(|a| a.to_string())?; Ok(vec![])
             }
             Plan::Update { table, sets, pk } => {
                 let policy = self.guard(sess, table, P_UPDATE)?;
@@ -695,7 +872,7 @@ impl Sql {
                 let schema = &table.schema;
                 let vals = sets.iter().map(|(c, e)| self.resolve(sess, e, params).map(|v| (*c, v))).collect::<Result<Vec<_>, _>>()?;
                 let f = |row: &[u8]| -> Result<Vec<u8>, Abort> { for p in &policy { if !p.eval(row) { return Err(Abort::NotFound); } } let mut new = row.to_vec(); for (c, v) in &vals { encode_col(schema, &mut new, *c, v).map_err(Abort::Type)?; } for p in &policy { if !p.eval(&new) { return Err(Abort::Type("permission denied: new row violates a policy".into())); } } Ok(new) };
-                match &mut sess.txn { Some(t) => table.txn_update(t, pk, f), None => table.update_by_pk(pk, f).map(|_| ()) }.map_err(|a| format!("{a:?}"))?;
+                match &mut sess.txn { Some(t) => table.txn_update(t, pk, f), None => table.update_by_pk(pk, f).map(|_| ()) }.map_err(|a| a.to_string())?;
                 Ok(vec![])
             }
             Plan::Delete { table, access, preds } => {
@@ -714,8 +891,8 @@ impl Sql {
                 }
                 let n = pks.len();
                 match &mut sess.txn {
-                    Some(t) => { for pk in pks { table.txn_delete(t, pk).map_err(|a| format!("{a:?}"))?; } }
-                    None => if n == 1 { table.delete_by_pk(pks[0]).map_err(|a| format!("{a:?}"))?; } else if n > 1 { let mut t = Txn::new(); for pk in pks { table.txn_delete(&mut t, pk).map_err(|a| format!("{a:?}"))?; } self.db.commit(t).map_err(|a| format!("{a:?}"))?; }
+                    Some(t) => { for pk in pks { table.txn_delete(t, pk).map_err(|a| a.to_string())?; } }
+                    None => if n == 1 { table.delete_by_pk(pks[0]).map_err(|a| a.to_string())?; } else if n > 1 { let mut t = Txn::new(); for pk in pks { table.txn_delete(&mut t, pk).map_err(|a| a.to_string())?; } self.db.commit(t).map_err(|a| a.to_string())?; }
                 }
                 Ok(vec![vec![Value::Int(n as i64)]])
             }

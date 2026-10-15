@@ -1,0 +1,12 @@
+=== E32: change feed (1M rows, then 100k inserts + 20k updates + 10k deletes while a consumer listens) ===
+sqlite  load 1M rows: 0.28 us/row plain, 1.05 us/row with audit triggers; changes table 60 MB after the load
+sqlite  130k single-row writes with triggers + a polling consumer: 3.31 s (25.5 us/write); consumer saw 130000 changes; commit -> visible p50 544 us, p99 1074 us
+sqlite  10k writes at ~5k/s with triggers + polling consumer: commit -> visible p50 156 us, p99 296 us
+sqlite  100k single-row inserts without triggers for comparison: 10.0 us/write; audit table must be pruned by hand
+ours    load 1M rows: 0.46 us/row (the feed is the log itself: nothing extra is written)
+ours    a new subscriber replays the 1M-row load from the log: 1000000 changes decoded in 0.19 s (5.36M changes/s)
+ours    130k single-row writes with a live subscriber: 0.09 s (0.7 us/write); subscriber saw 130000 changes (100000 inserts, 20000 updates, 10000 deletes); commit -> visible p50 156 us, p99 417 us
+ours    10k writes at ~5k/s with a live subscriber: commit -> visible p50 104 us, p99 181 us
+ours    100k single-row inserts with nobody listening: 0.4 us/write
+ours    resume from sequence 131001: 110000 changes delivered, in order true, first pk 1400000, last pk 1599999 (expected 110000: the 10k steady-rate inserts from 1400000 then the 100k from 1500000..1599999)
+ours    across an ALTER TABLE (one insert during the copy, one after): 2 events for 2 inserts: ["pk 77000001 with 4 columns", "pk 77000002 with 5 columns"]

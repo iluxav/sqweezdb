@@ -1,0 +1,96 @@
+=== E29: SQLite's documented quirks, same statements both sides ===
+ 1. text stored in an INT column
+    sqlite: ok: 'wxyz'
+    ours:   error: column n: type mismatch: column is INT, value is Text("wxyz")
+    -> ours rejects
+    note: SQLite keeps 'wxyz' in an INT column; ours fails the INSERT with the column and both types
+ 2. 2000 characters into VARCHAR(50)
+    sqlite: ok: 'xxxxxxxxxx…(2000 chars)'
+    ours:   error: column s: TEXT value of 2000 bytes exceeds TEXT(50)
+    -> ours rejects
+    note: SQLite stores all 2000; ours fails the INSERT (value exceeds VARCHAR(50))
+ 3. the same with SQLite's opt-in STRICT table
+    sqlite: error: cannot store TEXT value in INT column q3.n
+    ours:   error: column n: type mismatch: column is INT, value is Text("wxyz")
+    -> both reject
+    note: SQLite 3.37+ can be strict per table if asked; ours always is
+ 4. no BOOLEAN type: text into a BOOLEAN column
+    sqlite: ok: 'yes'
+    ours:   error: column f: type mismatch: column is BOOL, value is Text("yes")
+    -> ours rejects
+    note: SQLite stores 'yes'; ours has a real BOOL type
+ 5. TRUE/FALSE become column names
+    sqlite: ok: 0
+    ours:   error: unsupported projection true
+    -> ours rejects
+    note: in SQLite 'SELECT true' returns the column (0), not the boolean
+ 6. DATETIME column accepts anything
+    sqlite: ok: 'not a date'
+    ours:   error: unsupported type DATETIME
+    -> ours rejects
+    note: neither engine has a date type; SQLite silently accepts the declaration and any value, ours refuses the declaration (a TIMESTAMP type is H40)
+ 7. columns declared without any type
+    sqlite: ok: 1|'x'|2.5
+    ours:   error: sql parser error: Expected: a data type name, found: , at Line: 1, Column: 18
+    -> ours rejects
+ 8. foreign key not enforced
+    sqlite: ok: 999
+    ours:   ok: 999
+    -> same
+    note: SQLite parses REFERENCES and ignores it unless PRAGMA foreign_keys is on for the connection; ours does not enforce foreign keys yet either (planned round)
+ 9. NULL in a PRIMARY KEY (INT PRIMARY KEY is not the rowid)
+    sqlite: ok: NULL|1
+    ours:   error: column a is NOT NULL
+    -> ours rejects
+    note: a documented SQLite bug kept for compatibility
+10. NULL into INTEGER PRIMARY KEY is auto-assigned
+    sqlite: ok: 1|1
+    ours:   error: column id is NOT NULL
+    -> ours rejects
+    note: SQLite assigns 1; ours refuses a NULL key (the one E19a difference)
+11. bare column next to max()
+    sqlite: ok: 2|99
+    ours:   error: every selected column must appear in GROUP BY or inside an aggregate
+    -> ours rejects
+    note: SQLite returns the id of the max row (arbitrary on ties); ours requires a GROUP BY. Before this round ours silently returned NULL for the bare column: a bug found by this checklist
+12. GROUP BY without an aggregate picks an arbitrary row
+    sqlite: ok: 1|1 ; 2|3
+    ours:   error: every selected column must appear in GROUP BY or inside an aggregate
+    -> ours rejects
+    note: before this round ours returned every row ungrouped: a bug found by this checklist
+13. double-quoted string becomes a literal when no such column exists
+    sqlite: ok
+    ours:   error: unknown column nosuch
+    -> ours rejects
+    note: SQLite returns 0 rows silently: a misspelled identifier becomes a string; ours reports the unknown column
+14. keywords as table and column names
+    sqlite: error: near "union": syntax error
+    ours:   ok: true
+    -> sqlite rejects
+    note: the quirks page's own example; SQLite 3.53 now rejects 'union' as a table name, our parser accepts both names: not a quirk we avoid
+15. CREATE TABLE t(INTEGER PRIMARY KEY) makes a column named INTEGER
+    sqlite: ok: 'x'
+    ours:   error: unsupported type PRIMARY
+    -> ours rejects
+16. NUL byte inside text survives
+    sqlite: ok: 'a\0b'
+    ours:   ok: 'a\0b'
+    -> same
+    note: both store it; SQLite's own string functions stop at the NUL (we have none to test)
+17. '1' matches an integer key through type affinity
+    sqlite: ok: 1
+    ours:   error: expected INT, got Text("1")
+    -> ours rejects
+    note: SQLite converts '1' to 1 because the column is INTEGER, while 1='1' as an expression is false; ours refuses to compare text with an INT column
+18. a double in a TEXT comparison
+    sqlite: ok
+    ours:   error: column name: expected TEXT, got Float(1.5)
+    -> ours rejects
+    note: SQLite compares 'ann' with 1.5 and returns nothing; ours reports the type mismatch
+    not built in ours: CREATE TRIGGER AFTER INSERT ON t ... creates a trigger named AFTER (no triggers in ours)
+    not built in ours: upper()/lower() only fold ASCII (no string functions in ours)
+    not built in ours: comma joins vs RIGHT/FULL JOIN precedence (no RIGHT/FULL JOIN in ours)
+    not built in ours: AUTOINCREMENT differs from MySQL (no AUTOINCREMENT in ours)
+    not built in ours: WITHOUT ROWID tables (no rowid concept in ours)
+    not built in ours: ALTER TABLE limits (ALTER is the next round)
+summary: 18 checks: ours rejects 14, same 2, both reject 1, different 1; 0 differ from the stated expectation; 6 quirks concern features ours does not have

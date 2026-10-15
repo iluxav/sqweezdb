@@ -29,11 +29,13 @@ fn writes(sql: &Sql, exp: &mut HashMap<i64, Option<f64>>, seed: u64, next_id: &m
     let mut s = Session::default(); let mut rng = Rng(seed);
     let upd = sql.prepare("UPDATE t SET score = ? WHERE id = ?").unwrap(); let del = sql.prepare("DELETE FROM t WHERE id = ?").unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap();
     for k in 0..20_000 { let id = (rng.next() % n_rows() as u64) as i64 + 1; let sc = k as f64; if sql.execute_s(&mut s, &upd, &[Value::Float(sc), Value::Int(id)]).is_ok() && exp[&id].is_some() { exp.insert(id, Some(sc)); } }
-    for _ in 0..5_000 { let id = (rng.next() % n_rows() as u64) as i64 + 1; let r = sql.execute_s(&mut s, &del, &[Value::Int(id)]); if r.is_ok() { exp.insert(id, None); } }
+    for _ in 0..2_500 { let id = (rng.next() % n_rows() as u64) as i64 + 1; let r = sql.execute_s(&mut s, &del, &[Value::Int(id)]); if r.is_ok() { exp.insert(id, None); } }
     for _ in 0..10_000 { let id = *next_id; *next_id += 1; let sc = (rng.next() % 1000) as f64; sql.execute_s(&mut s, &ins, &row(id, sc)).unwrap(); exp.insert(id, Some(sc)); }
     // re-insert some deleted ids (same key as a dead mapped row)
     let dead: Vec<i64> = exp.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| *k).take(500).collect();
     for id in dead { sql.execute_s(&mut s, &ins, &row(id, 42.0)).unwrap(); exp.insert(id, Some(42.0)); }
+    // deletes last: a snapshot taken now has no row carrying the latest sequence (caught a sequence-restart bug, E26)
+    for _ in 0..2_500 { let id = (rng.next() % n_rows() as u64) as i64 + 1; let r = sql.execute_s(&mut s, &del, &[Value::Int(id)]); if r.is_ok() { exp.insert(id, None); } }
 }
 fn main() {
     let dir = PathBuf::from(DIR); let mut exp: HashMap<i64, Option<f64>> = HashMap::new(); let mut next_id = n_rows() + 1;
@@ -47,7 +49,9 @@ fn main() {
         total_bad += verify(&sql, &exp, &format!("round {round}: after restart ({} mapped rows, {} replayed)", rs.snap_rows, rs.replayed));
         writes(&sql, &mut exp, 100 + round as u64, &mut next_id);
         total_bad += verify(&sql, &exp, &format!("round {round}: after writes on the mapped table"));
-        if round == 2 { drop(sql); let (sql2, rs2) = Sql::open(&dir, false, 4).unwrap(); total_bad += verify(&sql2, &exp, &format!("round {round}: restart WITHOUT a new snapshot (replay {} records)", rs2.replayed)); let st = sql2.snapshot(); println!("snapshot {}: {} rows, {:.1} MB", round + 1, st.rows, st.bytes as f64 / 1e6); continue; }
+        drop(sql); let (sql, rs2) = Sql::open(&dir, false, 4).unwrap(); total_bad += verify(&sql, &exp, &format!("round {round}: restart WITHOUT a new snapshot (replay {} records)", rs2.replayed));
+        writes(&sql, &mut exp, 200 + round as u64, &mut next_id);
+        drop(sql); let (sql, rs3) = Sql::open(&dir, false, 4).unwrap(); total_bad += verify(&sql, &exp, &format!("round {round}: writes then restart again without a snapshot (replay {} records)", rs3.replayed));
         let st = sql.snapshot(); println!("snapshot {}: {} rows, {:.1} MB", round + 1, st.rows, st.bytes as f64 / 1e6);
     }
     let (sql, _) = Sql::open(&dir, false, 4).unwrap(); total_bad += verify(&sql, &exp, "final restart");

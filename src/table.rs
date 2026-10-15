@@ -1,7 +1,7 @@
 //! Schema-driven storage: typed fixed-width rows in chunked arenas, per-table ordered PK index and unique
 //! secondary index, pending-version conflict detection, shared group-commit log with generic records.
 //! Same design as engine.rs, generalized to any schema. Types are enforced at encode time.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
@@ -23,8 +23,11 @@ impl ColType {
     pub fn width(&self) -> usize { match self { ColType::Int | ColType::Float => 8, ColType::Bool => 1, ColType::Text(n) | ColType::Bytes(n) => 2 + *n } }
     pub fn name(&self) -> String { match self { ColType::Int => "INT".into(), ColType::Float => "DOUBLE".into(), ColType::Bool => "BOOL".into(), ColType::Text(n) => format!("TEXT({n})"), ColType::Bytes(n) => format!("BYTES({n})") } }
 }
-#[derive(Clone, Debug)] pub struct Column { pub name: String, pub ty: ColType, pub nullable: bool }
-#[derive(Clone, Debug)] pub struct Schema { pub name: String, pub columns: Vec<Column>, pub offsets: Vec<usize>, pub row_size: usize, pub pk: usize, pub unique: Option<usize>, pub null_bytes: usize }
+#[derive(Clone, Debug)] pub struct Column { pub name: String, pub ty: ColType, pub nullable: bool, pub default: Value }
+#[derive(Clone, Debug, PartialEq)] pub enum FkAction { Restrict, Cascade, SetNull }
+/// A foreign key: `col` references the primary key of table `parent`. Enforced always (no pragma); `on_delete` says what a parent delete does.
+#[derive(Clone, Debug)] pub struct FkDef { pub col: usize, pub parent: String, pub on_delete: FkAction }
+#[derive(Clone, Debug)] pub struct Schema { pub name: String, pub columns: Vec<Column>, pub offsets: Vec<usize>, pub row_size: usize, pub pk: usize, pub unique: Option<usize>, pub null_bytes: usize, pub fks: Vec<FkDef> }
 impl Schema {
     pub fn new(name: &str, columns: Vec<Column>, pk: usize, unique: Option<usize>) -> Result<Schema, String> {
         if columns.get(pk).map(|c| &c.ty) != Some(&ColType::Int) { return Err("primary key must be an INT column".into()); }
@@ -32,7 +35,7 @@ impl Schema {
         let null_bytes = (columns.len() + 7) / 8;
         let mut offsets = vec![]; let mut off = null_bytes;
         for c in &columns { offsets.push(off); off += c.ty.width(); }
-        Ok(Schema { name: name.to_string(), columns, offsets, row_size: off, pk, unique, null_bytes })
+        Ok(Schema { name: name.to_string(), columns, offsets, row_size: off, pk, unique, null_bytes, fks: vec![] })
     }
     pub fn col(&self, name: &str) -> Option<usize> { self.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name)) }
 }
@@ -92,48 +95,79 @@ pub const OP_INSERT: u8 = 1; pub const OP_UPDATE: u8 = 2; pub const OP_TXN: u8 =
 pub const SNAP_MAGIC: u64 = 0x534E41505F544233;
 pub const SNAP_ALIGN: usize = 4096;
 pub const SNAP_HDR: usize = 128;
-pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub durable: u64, pub stop: bool, pub batches: u64, pub bytes: u64, pub rotate: bool, pub segments: Vec<u64>, pub catalog: Vec<String> }
-pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub dir: PathBuf }
+/// Back-pressure: appends wait while this much log is waiting for the disk (bounds memory under write bursts).
+pub const LOG_BUF_CAP: usize = 32 << 20;
+/// Recent records kept in memory for in-process change feeds (they see a commit the moment it happens).
+pub const RECENT_CAP: usize = 32 << 20;
+pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub written: u64, pub durable: u64, pub stop: bool, pub batches: u64, pub bytes: u64, pub rotate: bool, pub segments: Vec<u64>, pub catalog: Vec<String>, pub sync_fd: Option<File>, pub writer_done: bool, pub recent: VecDeque<(u64, u8, u16, Arc<[u8]>)>, pub recent_bytes: usize }
+/// Writing and syncing are two threads: records reach the segment file (and so followers and change feeds) as soon as
+/// they are appended, independent of how long the current fsync takes; durability still comes from one fsync per batch.
+pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub cv_sync: Condvar, pub dir: PathBuf, /// live in-process change feeds; the memory ring is only kept while there is at least one
+    pub feeds: std::sync::atomic::AtomicUsize }
 impl GLog {
-    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![] }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), dir: dir.to_path_buf() } }
-    pub fn seg_path(&self, first: u64) -> PathBuf { self.dir.join(format!("log.{first:020}")) }
+    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0 }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0) } }
+    pub fn seg_path(&self, first: u64) -> PathBuf { Self::seg_path_in(&self.dir, first) }
+    pub fn seg_path_in(dir: &Path, first: u64) -> PathBuf { dir.join(format!("log.{first:020}")) }
     pub fn list_segments(dir: &Path) -> Vec<u64> {
         let mut v: Vec<u64> = fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("log.").and_then(|x| x.parse().ok()))).collect()).unwrap_or_default();
         v.sort(); v
     }
-    fn push_record(s: &mut LogState, op: u8, table: u16, payload: &[u8]) -> u64 {
+    fn push_record(&self, s: &mut LogState, op: u8, table: u16, payload: &[u8]) -> u64 {
         s.seq += 1; let seq = s.seq;
         let mut body = Vec::with_capacity(11 + payload.len());
         body.extend_from_slice(&seq.to_le_bytes()); body.push(op); body.extend_from_slice(&table.to_le_bytes()); body.extend_from_slice(payload);
         let crc = crc32(&body);
         s.buf.extend_from_slice(&(body.len() as u32).to_le_bytes()); s.buf.extend_from_slice(&crc.to_le_bytes()); s.buf.extend_from_slice(&body);
+        if self.feeds.load(Ordering::Relaxed) > 0 { s.recent.push_back((seq, op, table, Arc::from(payload))); s.recent_bytes += payload.len(); while s.recent_bytes > RECENT_CAP && s.recent.len() > 1 { if let Some((_, _, _, p)) = s.recent.pop_front() { s.recent_bytes -= p.len(); } } }
+        else if !s.recent.is_empty() { s.recent.clear(); s.recent_bytes = 0; }
         seq
     }
     /// record: [len u32][crc32c u32][seq u64][op u8][table u16][payload]
-    pub fn append(&self, op: u8, table: u16, payload: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); let seq = Self::push_record(&mut s, op, table, payload); self.cv_batch.notify_one(); seq }
+    pub fn append(&self, op: u8, table: u16, payload: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record(&mut s, op, table, payload); self.cv_batch.notify_one(); seq }
     /// A DDL or ACL statement: appended to the log and to the in-memory catalog under one lock, so a snapshot
     /// taken at sequence S sees exactly the statements with sequence <= S.
-    pub fn append_meta(&self, text: &str) -> u64 { let mut s = self.st.lock().unwrap(); let seq = Self::push_record(&mut s, OP_META, u16::MAX, text.as_bytes()); s.catalog.push(text.to_string()); self.cv_batch.notify_one(); seq }
+    pub fn append_meta(&self, text: &str) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record(&mut s, OP_META, u16::MAX, text.as_bytes()); s.catalog.push(text.to_string()); self.cv_batch.notify_one(); seq }
+    /// Records after `last` from the in-memory ring, up to `upto` (durable position in durable mode). `false` when the
+    /// ring no longer reaches back to `last + 1`: the caller must read the files to catch up.
+    pub fn recent_after(&self, last: u64, durable_only: bool) -> (Vec<(u64, u8, u16, Arc<[u8]>)>, bool) {
+        let s = self.st.lock().unwrap();
+        let upto = if durable_only { s.durable } else { s.seq };
+        match s.recent.front() { None => return (vec![], last >= s.seq), Some(f) if f.0 > last + 1 => return (vec![], false), _ => {} }
+        let out: Vec<_> = s.recent.iter().filter(|r| r.0 > last && r.0 <= upto).cloned().collect();
+        (out, true)
+    }
     pub fn snapshot_point(&self) -> (u64, Vec<String>) { let mut s = self.st.lock().unwrap(); s.rotate = true; self.cv_batch.notify_one(); (s.seq, s.catalog.clone()) }
     pub fn wait_durable(&self, seq: u64) { let mut s = self.st.lock().unwrap(); while s.durable < seq { s = self.cv_durable.wait(s).unwrap(); } }
     fn open_segment(&self, first: u64) -> File { OpenOptions::new().create(true).write(true).append(true).open(self.seg_path(first)).unwrap() }
+    /// The writer thread: appends batches to the current segment and publishes `written`; the syncer makes them durable.
     pub fn committer(&self) {
         let first = { let mut s = self.st.lock().unwrap(); let f = s.seq + 1; if s.segments.last() != Some(&f) { s.segments.push(f); } f };
-        let mut f = self.open_segment(first);
+        let mut f = self.open_segment(first); { let mut s = self.st.lock().unwrap(); s.sync_fd = Some(f.try_clone().unwrap()); self.cv_sync.notify_all(); }
         let mut local: Vec<u8> = Vec::with_capacity(1 << 22);
         loop {
             let seq_end;
             { let mut s = self.st.lock().unwrap();
               while s.buf.is_empty() && !s.stop && !s.rotate { s = self.cv_batch.wait(s).unwrap(); }
-              if s.buf.is_empty() && s.stop { return; }
-              if s.buf.is_empty() { s.rotate = false; let nf = s.seq + 1; if s.segments.last() != Some(&nf) { s.segments.push(nf); } drop(s); f = self.open_segment(nf); continue; }
-              std::mem::swap(&mut local, &mut s.buf); seq_end = s.seq; s.batches += 1; s.bytes += local.len() as u64; }
-            f.write_all(&local).unwrap(); f.sync_data().unwrap(); local.clear();
-            let rotate = { let mut s = self.st.lock().unwrap(); s.durable = seq_end; self.cv_durable.notify_all(); if s.rotate { s.rotate = false; s.segments.push(seq_end + 1); true } else { false } };
-            if rotate { f = self.open_segment(seq_end + 1); }
+              if s.buf.is_empty() && s.stop { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.writer_done = true; self.cv_sync.notify_all(); return; }  // the syncer exits only after this
+              if s.buf.is_empty() { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.rotate = false; let nf = s.seq + 1; if s.segments.last() != Some(&nf) { s.segments.push(nf); } drop(s); f = self.open_segment(nf); let mut s = self.st.lock().unwrap(); s.sync_fd = Some(f.try_clone().unwrap()); continue; }
+              std::mem::swap(&mut local, &mut s.buf); seq_end = s.seq; s.batches += 1; s.bytes += local.len() as u64; self.cv_durable.notify_all(); }  // appenders waiting on back-pressure may continue
+            f.write_all(&local).unwrap(); local.clear(); if local.capacity() > 2 * LOG_BUF_CAP { local = Vec::with_capacity(1 << 22); }
+            let mut s = self.st.lock().unwrap(); s.written = seq_end; self.cv_sync.notify_all();
+            if s.rotate { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.rotate = false; s.segments.push(seq_end + 1); drop(s); f = self.open_segment(seq_end + 1); let mut s = self.st.lock().unwrap(); s.sync_fd = Some(f.try_clone().unwrap()); }
         }
     }
-    pub fn stop(&self) { let mut s = self.st.lock().unwrap(); s.stop = true; self.cv_batch.notify_one(); }
+    /// The syncer thread: one fsync per batch of written records, then `durable` advances.
+    pub fn syncer(&self) {
+        loop {
+            let (target, fd) = { let mut s = self.st.lock().unwrap();
+                while (s.written <= s.durable || s.sync_fd.is_none()) && !(s.writer_done && s.written <= s.durable) { s = self.cv_sync.wait(s).unwrap(); }
+                if s.writer_done && s.written <= s.durable { return; }
+                (s.written, s.sync_fd.as_ref().unwrap().try_clone().unwrap()) };
+            fd.sync_data().unwrap();
+            let mut s = self.st.lock().unwrap(); if target > s.durable { s.durable = target; } self.cv_durable.notify_all();
+        }
+    }
+    pub fn stop(&self) { let mut s = self.st.lock().unwrap(); s.stop = true; self.cv_batch.notify_all(); self.cv_sync.notify_all(); }
 }
 /// Parse a log segment: (seq, op, table, payload). Stops at the first short or corrupt record.
 pub fn parse_glog(data: &[u8]) -> (Vec<(u64, u8, u16, Vec<u8>)>, usize) {
@@ -150,7 +184,50 @@ pub fn parse_glog(data: &[u8]) -> (Vec<(u64, u8, u16, Vec<u8>)>, usize) {
     (out, data.len() - pos)
 }
 
-#[derive(Debug, Clone, PartialEq)] pub enum Abort { NotFound, Conflict, Duplicate, Type(String) }
+#[derive(Debug, Clone, PartialEq)] pub enum Abort { NotFound, Conflict, Duplicate, Type(String), Fk(String) }
+impl std::fmt::Display for Abort { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { Abort::NotFound => write!(f, "NotFound"), Abort::Conflict => write!(f, "Conflict"), Abort::Duplicate => write!(f, "Duplicate"), Abort::Type(s) => write!(f, "{s}"), Abort::Fk(s) => write!(f, "{s}") } } }
+/// Resolved foreign key on a child table (`col` -> parent's primary key), with the index that makes parent-side checks cheap.
+#[derive(Clone)] pub struct FkLink { pub col: usize, pub parent: Arc<Table>, pub on_delete: FkAction, pub index: Arc<SecIndex> }
+/// Back-reference on a parent: which child tables point at it.
+#[derive(Clone)] pub struct ChildLink { pub table: std::sync::Weak<Table>, pub col: usize, pub on_delete: FkAction }
+
+/// Tails the log of a database directory: returns complete, CRC-checked records after `last_seq`, in order, across
+/// segment files as the owner rotates them. Records in a partially written batch are returned on a later poll.
+pub struct LogCursor { dir: PathBuf, seg: Option<(u64, File, u64)>, pub last_seq: u64 }
+impl LogCursor {
+    pub fn new(dir: &Path, last_seq: u64) -> LogCursor { LogCursor { dir: dir.to_path_buf(), seg: None, last_seq } }
+    fn open_next(&mut self) -> bool {
+        let segs = GLog::list_segments(&self.dir);
+        // the segment holding last_seq+1: the last one whose first sequence is <= last_seq+1
+        let want = self.last_seq + 1;
+        let cur_first = self.seg.as_ref().map(|s| s.0);
+        let pick = segs.iter().copied().filter(|&f| f <= want).last();
+        match pick { Some(f) if Some(f) != cur_first => { if let Ok(file) = File::open(GLog::seg_path_in(&self.dir, f)) { self.seg = Some((f, file, 0)); return true; } false } _ => false }
+    }
+    pub fn poll(&mut self) -> Vec<(u64, u8, u16, Vec<u8>)> { self.poll_upto(u64::MAX) }
+    /// Like `poll`, but leaves records with a sequence above `upto` in the file for a later poll.
+    pub fn poll_upto(&mut self, upto: u64) -> Vec<(u64, u8, u16, Vec<u8>)> {
+        let mut out = vec![];
+        if self.seg.is_none() && !self.open_next() { return out; }
+        loop {
+            let (first, file, off) = self.seg.as_mut().unwrap();
+            // read everything after the last complete record; a partial batch at the end is re-read next time
+            let mut buf = vec![]; file.seek(SeekFrom::Start(*off)).ok(); file.read_to_end(&mut buf).ok();
+            let mut partial = false;
+            if !buf.is_empty() {
+                let (recs, rest) = parse_glog(&buf);
+                let mut consumed = 0usize; let mut stop_here = false;
+                for r in recs { if r.0 > upto { stop_here = true; break; } consumed += 8 + 11 + r.3.len(); if r.0 > self.last_seq { self.last_seq = r.0; out.push(r); } }
+                if stop_here { *off += consumed as u64; return out; }
+                *off += (buf.len() - rest) as u64; partial = rest > 0;
+                if !out.is_empty() { return out; }
+            }
+            // nothing new here: has the owner moved on to a later segment?
+            let f = *first; if !partial && GLog::list_segments(&self.dir).iter().any(|&x| x > f && x <= self.last_seq + 1) { if !self.open_next() { return out; } continue; }
+            return out;
+        }
+    }
+}
 
 /// A chunk's bytes: owned on the heap, or a window into the private (copy-on-write) mapping of the snapshot file.
 pub enum ChunkBuf { Heap(Box<[u8]>), Mapped(*mut u8, usize) }
@@ -201,13 +278,20 @@ pub struct Table {
     pub log: Arc<GLog>, pub durable: bool,
     base: OnceLock<MappedBase>, map: OnceLock<Arc<MmapMut>>,
     free: Mutex<Vec<u32>>,
+    /// Online schema change in progress: every write is mirrored (converted) into the shadow table.
+    pub shadow: RwLock<Option<Shadow>>, pub retired: std::sync::atomic::AtomicBool,
+    pub fks: RwLock<Vec<FkLink>>, pub children: RwLock<Vec<ChildLink>>,
+    /// Log sequences during which this table owned its name (for change feeds: records outside are copies or stale writes).
+    pub owner_since: std::sync::atomic::AtomicU64, pub owner_until: std::sync::atomic::AtomicU64,
 }
+/// The target of an online ALTER TABLE: a table with the new schema and a row converter old -> new.
+#[derive(Clone)] pub struct Shadow { pub table: Arc<Table>, pub convert: Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync> }
 impl Table { #[inline] fn base_is_some(&self) -> bool { self.base.get().is_some() } }
 impl Table {
     pub fn new(id: u16, schema: Schema, log: Arc<GLog>, durable: bool) -> Table {
         let stride = 16 + schema.row_size;
         Table { id, schema, stride, chunks: (0..MAX_CHUNKS).map(|_| RwLock::new(Chunk { data: None })).collect(), next_slot: AtomicU32::new(0),
-                pk: (0..PK_SHARDS).map(|_| RwLock::new(BTreeMap::new())).collect(), sec: (0..SEC_SHARDS).map(|_| RwLock::new(UniqShard::default())).collect(), indexes: RwLock::new(vec![]), log, durable, base: OnceLock::new(), map: OnceLock::new(), free: Mutex::new(vec![]) }
+                pk: (0..PK_SHARDS).map(|_| RwLock::new(BTreeMap::new())).collect(), sec: (0..SEC_SHARDS).map(|_| RwLock::new(UniqShard::default())).collect(), indexes: RwLock::new(vec![]), log, durable, base: OnceLock::new(), map: OnceLock::new(), free: Mutex::new(vec![]), shadow: RwLock::new(None), retired: std::sync::atomic::AtomicBool::new(false), fks: RwLock::new(vec![]), children: RwLock::new(vec![]), owner_since: std::sync::atomic::AtomicU64::new(0), owner_until: std::sync::atomic::AtomicU64::new(u64::MAX) }
     }
     #[inline] fn pk_shard(pk: i64) -> usize { ((pk as u64) / PK_SHARD_KEYS as u64) as usize % PK_SHARDS }
     #[inline] fn sec_shard_h(h: u64) -> usize { (h >> 56) as usize & (SEC_SHARDS - 1) }
@@ -237,6 +321,73 @@ impl Table {
     /// Return a dead slot for reuse. Mapped slots stay dead: the mapped region must keep its key order.
     #[inline] fn free_slot(&self, slot: u32) { if slot as usize >= self.mapped_rows() { self.free.lock().unwrap().push(slot); } }
     pub fn free_slots(&self) -> usize { self.free.lock().unwrap().len() }
+    // ---- foreign keys ----
+    /// Verify every non-NULL foreign key of `row` has a live parent, and return read guards on the parents' key shards so
+    /// the parents cannot be deleted until the caller's write is published (parent deletes take those shards for writing).
+    pub fn fk_guards<'a>(&self, links: &'a [FkLink], row: &[u8]) -> Result<Vec<RwLockReadGuard<'a, BTreeMap<i64, u32>>>, Abort> {
+        let mut want: Vec<(usize, usize, i64, usize)> = vec![];  // (parent id, shard, key, link index)
+        for (i, l) in links.iter().enumerate() { if let Some(v) = read_key(&self.schema, row, l.col) { want.push((l.parent.id as usize, Self::pk_shard(v), v, i)); } }
+        want.sort_unstable(); want.dedup_by_key(|w| (w.0, w.1, w.2));
+        let mut guards = vec![]; let mut held: Vec<(usize, usize)> = vec![];
+        for (pid, shard, v, i) in want {
+            let l = &links[i];
+            if held.last() == Some(&(pid, shard)) { if l.parent.pk_slot(v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {v} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); } continue; }
+            let m = l.parent.pk[shard].read().unwrap();
+            if l.parent.pk_slot_in(&m, v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {v} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); }
+            guards.push(m); held.push((pid, shard));
+        }
+        Ok(guards)
+    }
+    /// Parent side of a delete: RESTRICT refuses while children exist; CASCADE and SET NULL return the work to do after the row is gone.
+    fn fk_children_check(&self, pk: i64) -> Result<Vec<(Arc<Table>, usize, FkAction)>, Abort> {
+        let mut todo = vec![];
+        for c in self.children.read().unwrap().iter() {
+            let Some(ct) = c.table.upgrade() else { continue }; if ct.retired.load(Ordering::Relaxed) { continue; }
+            let Some(ix) = ct.index_on(c.col) else { continue }; let n = ix.count(pk); if n == 0 { continue; }
+            match c.on_delete { FkAction::Restrict => return Err(Abort::Fk(format!("delete from {} blocked: {n} row(s) in {}.{} reference {} = {pk}", self.schema.name, ct.schema.name, ct.schema.columns[c.col].name, self.schema.columns[self.schema.pk].name))), _ => todo.push((ct.clone(), c.col, c.on_delete.clone())) }
+        }
+        Ok(todo)
+    }
+    fn fk_apply(&self, pk: i64, todo: Vec<(Arc<Table>, usize, FkAction)>) -> Result<(), Abort> {
+        for (ct, col, action) in todo {
+            let Some(ix) = ct.index_on(col) else { continue };
+            let mut cpks = vec![]; for slot in ix.slots(pk) { if let Some(Some(cpk)) = ct.with_slot(slot, |_, r| if read_key(&ct.schema, r, col) == Some(pk) { Some(ct.pk_of(r)) } else { None }) { cpks.push(cpk); } }
+            for cpk in cpks { match action { FkAction::Cascade => { match ct.delete_by_pk(cpk) { Ok(_) | Err(Abort::NotFound) => {}, Err(e) => return Err(e) } } FkAction::SetNull => { let sch = ct.schema.clone(); match ct.update_by_pk(cpk, |r| { let mut n = r.to_vec(); encode_col(&sch, &mut n, col, &Value::Null).map_err(Abort::Type)?; Ok(n) }) { Ok(_) | Err(Abort::NotFound) => {}, Err(e) => return Err(e) } } FkAction::Restrict => {} } }
+        }
+        Ok(())
+    }
+    // ---- online ALTER TABLE: mirrored writes, background copy, swap ----
+    fn shadow(&self) -> Option<Shadow> { self.shadow.read().unwrap().clone() }
+    pub fn mirror_insert(&self, row: &[u8]) { if let Some(sh) = self.shadow() { if let Ok(r) = (sh.convert)(row) { let _ = sh.table.insert(&r); } } }
+    pub fn mirror_update(&self, row: &[u8]) { if let Some(sh) = self.shadow() { if let Ok(r) = (sh.convert)(row) { let pk = self.pk_of(row); match sh.table.update_by_pk(pk, |_| Ok(r.clone())) { Err(Abort::NotFound) => { let _ = sh.table.insert(&r); } _ => {} } } } }
+    pub fn mirror_delete(&self, pk: i64) { if let Some(sh) = self.shadow() { let _ = sh.table.delete_by_pk(pk); } }
+    /// Slot of a key when the caller already holds the key's shard lock.
+    #[inline] fn pk_slot_in(&self, m: &BTreeMap<i64, u32>, pk: i64) -> Option<u32> { if let Some(s) = self.mapped_slot(pk) { if self.slot_live(s) { return Some(s); } } m.get(&pk).copied() }
+    /// Copy every live row into the shadow (converted). Each row is re-checked under its key's shard lock right before
+    /// the insert, so a concurrent delete (which takes that lock to unpublish, then mirrors the delete) can never be
+    /// undone by a stale copy; concurrent updates win because the copier only inserts and never overwrites.
+    pub fn copy_into_shadow(&self, sh: &Shadow, stop: &std::sync::atomic::AtomicBool) -> Result<(u64, u64), String> {
+        let (mut copied, mut skipped) = (0u64, 0u64);
+        let mut keys: Vec<i64> = Vec::with_capacity(1024);
+        for ck in 0..self.chunk_count() {
+            if stop.load(Ordering::Relaxed) { return Err("stopped".into()); }
+            keys.clear();
+            { let c = self.chunks[ck].read().unwrap(); if let Some(d) = c.data.as_ref() { for i in 0..CHUNK_ROWS { let o = i * self.stride; if u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) > 0 { keys.push(self.pk_of(&d[o + 16..o + self.stride])); } } } }
+            for &pk in &keys {
+                let m = self.pk[Self::pk_shard(pk)].read().unwrap();
+                let row = match self.pk_slot_in(&m, pk) { Some(slot) => self.with_slot(slot, |_, r| if self.pk_of(r) == pk { Some(r.to_vec()) } else { None }).flatten(), None => None };
+                match row { Some(r) => { let conv = (sh.convert)(&r)?; match sh.table.insert(&conv) { Ok(_) => copied += 1, Err(Abort::Duplicate) => skipped += 1, Err(e) => return Err(format!("{e:?}")) } } None => skipped += 1 }
+            }
+        }
+        Ok((copied, skipped))
+    }
+    /// Retire: drop every row and index (memory back), keep the id so old log records still resolve.
+    pub fn clear(&self) {
+        self.retired.store(true, Ordering::Relaxed); *self.shadow.write().unwrap() = None;
+        for c in self.chunks.iter() { let mut c = c.write().unwrap(); c.data = None; }
+        for sh in &self.pk { sh.write().unwrap().clear(); } for sh in &self.sec { *sh.write().unwrap() = UniqShard::default(); }
+        self.indexes.write().unwrap().clear(); self.free.lock().unwrap().clear(); self.next_slot.store(0, Ordering::Relaxed);
+    }
     /// Diagnostics for one key: how the mapped lookup resolves it.
     pub fn debug_lookup(&self, pk: i64) -> String {
         let b = match self.base.get() { Some(b) => b, None => return "no mapped base".into() };
@@ -275,7 +426,12 @@ impl Table {
     }
     /// Autocommit delete by primary key. The log record carries only the key (8 bytes).
     pub fn delete_by_pk(&self, pk: i64) -> Result<u64, Abort> {
-        let slot = match self.pk_slot(pk) { Some(s) => s, None => return Err(Abort::NotFound) };
+        let has_children = !self.children.read().unwrap().is_empty();
+        // with children: hold this key's shard for writing from the children check to the zeroing, so no child row can
+        // be inserted against a parent that is about to vanish (child inserts hold the shard for reading meanwhile)
+        let guard = if has_children { Some(self.pk[Self::pk_shard(pk)].write().unwrap()) } else { None };
+        let slot = match guard.as_ref() { Some(m) => self.pk_slot_in(m, pk), None => self.pk_slot(pk) }; let slot = match slot { Some(s) => s, None => return Err(Abort::NotFound) };
+        let todo = if has_children { self.fk_children_check(pk)? } else { vec![] };
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
         let (seq, row) = {
             let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride);
@@ -284,7 +440,10 @@ impl Table {
             let seq = self.log.append(OP_DELETE, self.id, &pk.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
         if self.durable { self.log.wait_durable(seq); }
         { let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride); d[off..off + 16].copy_from_slice(&[0u8; 16]); }
-        self.unpublish(slot, &row); self.free_slot(slot);
+        match guard { Some(mut m) => { m.remove(&pk); drop(m); if let Some(k) = self.unique_key(&row) { self.uniq_remove(k, slot); } self.idx_remove(&row, slot); } None => self.unpublish(slot, &row) }
+        self.free_slot(slot);
+        self.mirror_delete(pk);
+        self.fk_apply(pk, todo)?;
         Ok(seq)
     }
     /// Idempotent replay of a delete record (payload: the 8-byte key; older logs carried the whole row).
@@ -411,6 +570,7 @@ impl Table {
 
     pub fn insert(&self, row: &[u8]) -> Result<u64, Abort> {
         debug_assert_eq!(row.len(), self.schema.row_size);
+        let links = self.fks.read().unwrap().clone(); let _fk = self.fk_guards(&links, row)?;
         let pk = self.pk_of(row);
         let ukey: Option<Vec<u8>> = self.unique_key(row).map(|k| k.to_vec());
         let slot = self.alloc_slot();
@@ -434,6 +594,7 @@ impl Table {
           let d = Self::alloc(&mut c, self.stride);
           d[off..off + 8].copy_from_slice(&seq.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&0u64.to_le_bytes()); }
         self.idx_add(row, slot);
+        self.mirror_insert(row);
         Ok(seq)
     }
 
@@ -461,6 +622,7 @@ impl Table {
         if self.pk_of(&row) != pk { return Err(Abort::NotFound); }
         let new = f(&row)?;
         if new.len() != self.schema.row_size || self.pk_of(&new) != pk { return Err(Abort::Type("row shape or primary key changed".into())); }
+        let links = self.fks.read().unwrap().clone(); let _fk = self.fk_guards(&links, &new)?;
         let old_key = self.unique_key(&row).map(|k| k.to_vec()); let new_key = self.unique_key(&new).map(|k| k.to_vec());
         let key_changed = old_key != new_key;
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
@@ -482,6 +644,7 @@ impl Table {
           d[off..off + 8].copy_from_slice(&seq.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&0u64.to_le_bytes()); d[off + 16..off + self.stride].copy_from_slice(&new); }
         if key_changed { if let Some(k) = old_key { self.uniq_remove(&k, slot); } }
         self.idx_replace(&row, &new, slot);
+        self.mirror_update(&new);
         Ok(seq)
     }
 
@@ -529,7 +692,7 @@ impl Table {
 pub struct Database {
     pub dir: PathBuf, pub log: Arc<GLog>, pub durable: bool,
     tables: RwLock<Vec<Arc<Table>>>, names: RwLock<HashMap<String, usize>>,
-    committer: Mutex<Option<std::thread::JoinHandle<()>>>,
+    committer: Mutex<Option<std::thread::JoinHandle<()>>>, syncer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 #[derive(Debug, Default)] pub struct SnapStats { pub rows: u64, pub bytes: u64, pub low_water: u64, pub secs: f64, pub deleted_segments: usize }
 #[derive(Debug, Default)] pub struct RecStats { pub snap_rows: u64, pub snap_secs: f64, pub catalog: usize, pub replayed: u64, pub skipped: u64, pub replay_secs: f64, pub segments: usize, pub low_water: u64 }
@@ -537,18 +700,60 @@ impl Database {
     /// Open (or create) a database directory. Nothing is replayed here; see `recover`. The committer starts on `start`.
     pub fn open(dir: &Path, durable: bool) -> Database {
         fs::create_dir_all(dir).unwrap();
-        Database { dir: dir.to_path_buf(), log: Arc::new(GLog::new(dir)), durable, tables: RwLock::new(vec![]), names: RwLock::new(HashMap::new()), committer: Mutex::new(None) }
+        Database { dir: dir.to_path_buf(), log: Arc::new(GLog::new(dir)), durable, tables: RwLock::new(vec![]), names: RwLock::new(HashMap::new()), committer: Mutex::new(None), syncer: Mutex::new(None) }
     }
-    pub fn start(&self) { let l = self.log.clone(); *self.committer.lock().unwrap() = Some(std::thread::spawn(move || l.committer())); }
+    pub fn start(&self) { let l = self.log.clone(); *self.committer.lock().unwrap() = Some(std::thread::spawn(move || l.committer())); let l2 = self.log.clone(); *self.syncer.lock().unwrap() = Some(std::thread::spawn(move || l2.syncer())); }
     pub fn create_table(&self, schema: Schema) -> Result<Arc<Table>, String> {
         let mut names = self.names.write().unwrap(); let mut tables = self.tables.write().unwrap();
         let key = schema.name.to_lowercase();
         if names.contains_key(&key) { return Err(format!("table {} already exists", schema.name)); }
         let t = Arc::new(Table::new(tables.len() as u16, schema, self.log.clone(), self.durable));
+        t.owner_since.store(self.log.st.lock().unwrap().seq + 1, Ordering::Relaxed);
         names.insert(key, tables.len()); tables.push(t.clone());
+        drop(tables); drop(names);
+        self.link_fks(&t)?;
         Ok(t)
     }
+    /// Resolve a table's foreign keys: the parent must exist, the column must be INT; the child column gets an index.
+    fn link_fks(&self, t: &Arc<Table>) -> Result<(), String> {
+        for fk in t.schema.fks.clone() {
+            let parent = self.table(&fk.parent).ok_or(format!("foreign key on {}.{} references unknown table {}", t.schema.name, t.schema.columns[fk.col].name, fk.parent))?;
+            if t.schema.columns[fk.col].ty != ColType::Int { return Err(format!("foreign key column {}.{} must be INT", t.schema.name, t.schema.columns[fk.col].name)); }
+            if fk.on_delete == FkAction::SetNull && !t.schema.columns[fk.col].nullable { return Err(format!("ON DELETE SET NULL needs a nullable column: {}.{}", t.schema.name, t.schema.columns[fk.col].name)); }
+            let index = match t.index_on(fk.col) { Some(ix) => ix, None => t.create_index(&format!("fk_{}_{}", t.schema.name, t.schema.columns[fk.col].name), fk.col)? };
+            t.fks.write().unwrap().push(FkLink { col: fk.col, parent: parent.clone(), on_delete: fk.on_delete.clone(), index });
+            parent.children.write().unwrap().push(ChildLink { table: Arc::downgrade(t), col: fk.col, on_delete: fk.on_delete });
+        }
+        Ok(())
+    }
     pub fn table(&self, name: &str) -> Option<Arc<Table>> { let i = *self.names.read().unwrap().get(&name.to_lowercase())?; self.tables.read().unwrap().get(i).cloned() }
+    /// Start an online ALTER: create the shadow table (new schema, next id) and mirror writes into it from now on.
+    pub fn alter_start(&self, name: &str, schema: Schema, convert: Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>) -> Result<(Arc<Table>, Arc<Table>), String> {
+        let old = self.table(name).ok_or(format!("no such table {name}"))?;
+        if old.shadow.read().unwrap().is_some() { return Err(format!("table {name} already has a schema change in progress")); }
+        let shadow = { let mut names = self.names.write().unwrap(); let mut tables = self.tables.write().unwrap(); let t = Arc::new(Table::new(tables.len() as u16, schema, self.log.clone(), self.durable)); t.owner_since.store(u64::MAX, Ordering::Relaxed); names.insert(format!("\u{0}alter:{}", name.to_lowercase()), tables.len()); tables.push(t.clone()); t };
+        self.link_fks(&shadow)?;
+        *old.shadow.write().unwrap() = Some(Shadow { table: shadow.clone(), convert });
+        Ok((old, shadow))
+    }
+    /// Finish: the shadow takes the name. The old table is returned still intact and still mirroring, so statements
+    /// planned before the swap keep working; the caller empties it once they have drained (`Table::clear`).
+    pub fn alter_finish(&self, name: &str) -> Result<Arc<Table>, String> {
+        let key = name.to_lowercase(); let skey = format!("\u{0}alter:{key}");
+        let (old, new) = { let mut names = self.names.write().unwrap(); let si = *names.get(&skey).ok_or(format!("no schema change in progress on {name}"))?; let oi = *names.get(&key).unwrap(); names.insert(key.clone(), si); names.remove(&skey); let t = self.tables.read().unwrap(); (t[oi].clone(), t[si].clone()) };
+        // children that referenced the old table now reference the new one; the new table inherits the back-references
+        let kids: Vec<ChildLink> = old.children.read().unwrap().clone(); new.children.write().unwrap().extend(kids.iter().cloned());
+        for c in &kids { if let Some(ct) = c.table.upgrade() { for l in ct.fks.write().unwrap().iter_mut() { if Arc::ptr_eq(&l.parent, &old) { l.parent = new.clone(); } } } }
+        let at = self.log.st.lock().unwrap().seq + 1; new.owner_since.store(at, Ordering::Relaxed); old.owner_until.store(at, Ordering::Relaxed);
+        old.retired.store(true, Ordering::Relaxed); Ok(old)
+    }
+    /// Abandon: drop the shadow (its rows are discarded), keep the old table.
+    pub fn alter_abort(&self, name: &str) -> Result<(), String> {
+        let key = name.to_lowercase(); let skey = format!("\u{0}alter:{key}");
+        let (old, sh) = { let mut names = self.names.write().unwrap(); let si = names.remove(&skey).ok_or(format!("no schema change in progress on {name}"))?; let oi = *names.get(&key).unwrap(); let t = self.tables.read().unwrap(); (t[oi].clone(), t[si].clone()) };
+        *old.shadow.write().unwrap() = None; sh.clear(); Ok(())
+    }
+    pub fn tables_with_shadow(&self) -> Vec<(String, Arc<Table>)> { let names = self.names.read().unwrap(); let t = self.tables.read().unwrap(); names.iter().filter(|(k, _)| !k.starts_with('\u{0}')).filter_map(|(k, &i)| if t[i].shadow.read().unwrap().is_some() { Some((k.clone(), t[i].clone())) } else { None }).collect() }
     pub fn table_by_id(&self, id: u16) -> Option<Arc<Table>> { self.tables.read().unwrap().get(id as usize).cloned() }
 
     /// Fuzzy snapshot of every table that existed at the snapshot point, plus the catalog (DDL + ACL statements).
@@ -556,11 +761,11 @@ impl Database {
     pub fn snapshot(&self) -> SnapStats {
         let t = Instant::now();
         let (s0, catalog) = self.log.snapshot_point();
-        let ntables = catalog.iter().filter(|c| c.trim_start().to_uppercase().starts_with("CREATE TABLE")).count();
+        let ntables = catalog.iter().filter(|c| { let u = c.trim_start().to_uppercase(); u.starts_with("CREATE TABLE") || (u.starts_with("ALTER TABLE") && !u.ends_with(" DONE") && !u.ends_with(" ABORT")) }).count();
         let tables: Vec<Arc<Table>> = { let ts = self.tables.read().unwrap(); ts.iter().take(ntables).cloned().collect() };
         let tmp = self.dir.join("snap.tmp");
         let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp).unwrap());
-        w.write_all(&SNAP_MAGIC.to_le_bytes()).unwrap(); w.write_all(&0u64.to_le_bytes()).unwrap();
+        w.write_all(&SNAP_MAGIC.to_le_bytes()).unwrap(); w.write_all(&0u64.to_le_bytes()).unwrap(); w.write_all(&s0.to_le_bytes()).unwrap();
         w.write_all(&(catalog.len() as u32).to_le_bytes()).unwrap();
         for c in &catalog { w.write_all(&(c.len() as u32).to_le_bytes()).unwrap(); w.write_all(c.as_bytes()).unwrap(); }
         w.write_all(&(tables.len() as u16).to_le_bytes()).unwrap();
@@ -594,14 +799,27 @@ impl Database {
 
     /// Restart: catalog statements go through `meta` (which recreates tables and ACL without logging), rows are
     /// loaded in parallel, then log segments are replayed from low_water. Call `start()` afterwards.
-    pub fn recover(self: &Arc<Self>, threads: usize, meta: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<RecStats, String> {
+    pub fn recover(self: &Arc<Self>, threads: usize, meta: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<RecStats, String> { self.recover_upto(threads, meta, u64::MAX) }
+    /// Apply one durable log record (restart replay and follower replication share this).
+    pub fn apply_record(&self, seq: u64, op: u8, table: u16, payload: &[u8], meta: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<Option<String>, String> {
+        match op {
+            OP_META => { let text = String::from_utf8_lossy(payload).into_owned(); meta(&text)?; Ok(Some(text)) }
+            OP_INSERT | OP_UPDATE => { self.table_by_id(table).ok_or(format!("log refers to unknown table {table}"))?.replay_record(seq, payload); Ok(None) }
+            OP_DELETE => { self.table_by_id(table).ok_or(format!("log refers to unknown table {table}"))?.replay_delete(seq, payload); Ok(None) }
+            OP_TXN => { let mut p = 0; while p + 7 <= payload.len() { let tid = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap()); let op2 = payload[p + 2]; let len = u32::from_le_bytes(payload[p + 3..p + 7].try_into().unwrap()) as usize; p += 7; let tb = self.table_by_id(tid).ok_or(format!("log refers to unknown table {tid}"))?; if op2 == OP_DELETE { tb.replay_delete(seq, &payload[p..p + len]); } else { tb.replay_record(seq, &payload[p..p + len]); } p += len; } Ok(None) }
+            _ => Err(format!("unknown log op {op}")),
+        }
+    }
+    /// Restart up to and including log sequence `upto` (point-in-time restore); u64::MAX means everything.
+    pub fn recover_upto(self: &Arc<Self>, threads: usize, meta: &mut dyn FnMut(&str) -> Result<(), String>, upto: u64) -> Result<RecStats, String> {
         let t = Instant::now();
         let mut st = RecStats { low_water: 1, ..Default::default() };
         let mut max_seq = 0u64; let mut catalog: Vec<String> = vec![];
         if let Ok(mut f) = File::open(self.dir.join("snap")) {
-            let mut h = [0u8; 16]; f.read_exact(&mut h).map_err(|e| e.to_string())?;
+            let mut h = [0u8; 24]; f.read_exact(&mut h).map_err(|e| e.to_string())?;
             if u64::from_le_bytes(h[..8].try_into().unwrap()) != SNAP_MAGIC { return Err("bad snapshot magic".into()); }
             st.low_water = u64::from_le_bytes(h[8..16].try_into().unwrap());
+            max_seq = u64::from_le_bytes(h[16..24].try_into().unwrap());  // the log position at the snapshot point: new sequences continue from here even if the last records were deletes
             let mut b4 = [0u8; 4]; f.read_exact(&mut b4).map_err(|e| e.to_string())?; let ncat = u32::from_le_bytes(b4) as usize;
             for _ in 0..ncat { f.read_exact(&mut b4).map_err(|e| e.to_string())?; let l = u32::from_le_bytes(b4) as usize; let mut tb = vec![0u8; l]; f.read_exact(&mut tb).map_err(|e| e.to_string())?; let text = String::from_utf8_lossy(&tb).into_owned(); meta(&text)?; catalog.push(text); }
             let mut b2 = [0u8; 2]; f.read_exact(&mut b2).map_err(|e| e.to_string())?; let ntables = u16::from_le_bytes(b2) as usize;
@@ -632,22 +850,19 @@ impl Database {
             let (recs, _) = parse_glog(&data);
             for (seq, op, table, payload) in recs {
                 if seq < st.low_water { st.skipped += 1; continue; }
+                if seq > upto { break; }
                 max_seq = max_seq.max(seq); st.replayed += 1;
-                match op {
-                    OP_META => { let text = String::from_utf8_lossy(&payload).into_owned(); meta(&text)?; catalog.push(text); }
-                    OP_INSERT | OP_UPDATE => { self.table_by_id(table).ok_or(format!("log refers to unknown table {table}"))?.replay_record(seq, &payload); }
-                    OP_DELETE => { self.table_by_id(table).ok_or(format!("log refers to unknown table {table}"))?.replay_delete(seq, &payload); }
-                    OP_TXN => { let mut p = 0; while p + 7 <= payload.len() { let tid = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap()); let op2 = payload[p + 2]; let len = u32::from_le_bytes(payload[p + 3..p + 7].try_into().unwrap()) as usize; p += 7; let tb = self.table_by_id(tid).ok_or(format!("log refers to unknown table {tid}"))?; if op2 == OP_DELETE { tb.replay_delete(seq, &payload[p..p + len]); } else { tb.replay_record(seq, &payload[p..p + len]); } p += len; } }
-                    _ => return Err(format!("unknown log op {op}")),
-                }
+                if op == OP_META { self.log.st.lock().unwrap().seq = seq - 1; }  // so create/alter record the ownership interval at this sequence
+                if let Some(text) = self.apply_record(seq, op, table, &payload, meta)? { catalog.push(text); }
             }
+            if max_seq >= upto { break; }
         }
         st.replay_secs = t.elapsed().as_secs_f64(); st.catalog = catalog.len();
-        { let mut s = self.log.st.lock().unwrap(); s.seq = max_seq; s.durable = max_seq; s.segments = segs; s.catalog = catalog; }
+        { let mut s = self.log.st.lock().unwrap(); s.seq = max_seq; s.written = max_seq; s.durable = max_seq; s.segments = segs; s.catalog = catalog; }
         Ok(st)
     }
 }
-impl Drop for Database { fn drop(&mut self) { self.log.stop(); if let Some(h) = self.committer.lock().unwrap().take() { h.join().ok(); } } }
+impl Drop for Database { fn drop(&mut self) { self.log.stop(); if let Some(h) = self.committer.lock().unwrap().take() { h.join().ok(); } if let Some(h) = self.syncer.lock().unwrap().take() { h.join().ok(); } } }
 
 // ---------- multi-statement transactions (optimistic, first committer wins) ----------
 pub const TXN_MARK: u64 = 1 << 63;
@@ -725,6 +940,7 @@ impl Table {
     }
     // phase-1 claims
     fn claim_insert(&self, row: &[u8], slot_out: &mut u32, mark: u64) -> Result<(), Abort> {
+        { let links = self.fks.read().unwrap().clone(); let _ = self.fk_guards(&links, row)?; }
         let pk = self.pk_of(row); let ukey = self.unique_key(row).map(|k| k.to_vec());
         let slot = self.alloc_slot();
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
@@ -750,6 +966,7 @@ impl Table {
         self.free_slot(slot);
     }
     fn claim_update(&self, slot: u32, base: u64, new: &[u8], old_key: Option<&[u8]>, mark: u64) -> Result<(), Abort> {
+        { let links = self.fks.read().unwrap().clone(); let _ = self.fk_guards(&links, new)?; }
         let new_key = self.unique_key(new);
         let key_changed = new_key != old_key;
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
@@ -770,6 +987,7 @@ impl Table {
         if new_key != old_key { if let Some(k) = new_key { self.uniq_remove(k, slot); } }
     }
     fn claim_delete(&self, slot: u32, base: u64, mark: u64) -> Result<(), Abort> {
+        if !self.children.read().unwrap().is_empty() { let pk = self.with_slot(slot, |_, r| self.pk_of(r)).ok_or(Abort::NotFound)?; let todo = self.fk_children_check(pk)?; if !todo.is_empty() { return Err(Abort::Fk(format!("ON DELETE CASCADE / SET NULL from {} is only supported outside transactions (for now)", self.schema.name))); } }
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
         let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride);
         let (v, p) = Self::hdr_at(d, off); if p != 0 || v != base { return Err(Abort::Conflict); }
@@ -840,6 +1058,7 @@ impl Database {
             match (w, old) { (TxnWrite::Insert { row, .. }, _) => t.idx_add(row, slot), (TxnWrite::Update { row, .. }, Some(old)) => t.idx_replace(&old, row, slot), _ => {} }
         }
         for w in &txn.writes { if let TxnWrite::Update { table, row, old_key: Some(k), slot, .. } = w { if table.unique_key(row) != Some(&k[..]) { table.uniq_remove(k, *slot); } } }
+        for w in &txn.writes { match w { TxnWrite::Insert { table, row, .. } => table.mirror_insert(row), TxnWrite::Update { table, row, .. } => table.mirror_update(row), TxnWrite::Delete { table, row, .. } => table.mirror_delete(table.pk_of(row)) } }
         Ok(seq)
     }
 }
