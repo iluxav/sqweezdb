@@ -1,0 +1,2795 @@
+commit be8d6044eacb843b74d335db0c5fbe09222031fe
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Oct 9 10:34:46 2026 +0100
+
+    Version v1.75.2
+
+commit bd07f481e2bc749058437f1ebec37e6200c25cd3
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Oct 8 23:51:15 2026 +0100
+
+    build: fix lint errors after golang.org/x/net update
+    
+    golang.org/x/net v0.60.0 deprecates its HTTP/2 server and transport in
+    favour of net/http.
+    
+    Make the h2c test use http.Transport with unencrypted HTTP/2. serve
+    restic --stdio still needs http2.Server to serve HTTP/2 on a single
+    connection as http.Server has no way of doing that.
+    
+    (cherry picked from commit d3db33c6b7dde0ad295796ba3f189705fed0b353)
+
+commit 56059c47c86eed6b3d69344f1de1fb6bd75f36e4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Oct 8 23:51:15 2026 +0100
+
+    build: update golang.org/x/net to v0.60.0 to fix multiple CVEs
+    
+    Upgrade to v0.60.0 of golang.org/x/net in order to address:
+    
+    - CVE-2026-78659: net/http: HTTP/2 server memory exhaustion due to Trailer headers
+    - CVE-2026-78669: net/http: excessive CPU consumption from repeated initial window changes
+    - CVE-2026-78663: net/http: double flow control refund on HTTP/2 server streams
+    - CVE-2026-97032: net/http: HTTP/2 server crash due to HPACK encoder race
+    
+    This also updates golang.org/x/crypto, sync, sys, term and text to the
+    versions golang.org/x/net v0.60.0 requires.
+    
+    (cherry picked from commit e4a3adb94c63a61a66d96f635f9cfde589d0dbed)
+
+commit 35ab21109b1fd16e712cfa0b8903f273ae026229
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Oct 8 23:20:27 2026 +0100
+
+    rest: fix TestStripHeadersOnCrossHostRedirectFn failing on go1.26
+    
+    Before go1.27 net/http compares hosts case sensitively when deciding
+    whether to keep Authorization on a redirect, so it dropped the header
+    itself on the localhost -> LOCALHOST redirect in the
+    SameHostDifferentCase test, before StripHeadersOnCrossHostRedirectFn
+    was consulted. The other headers still show the function treats the
+    hosts as the same.
+    
+    (cherry picked from commit f440573c3eaeadd043b1b17fbbf7203ea00b06e2)
+
+commit fc7a57b447642f1e9d7450e9c8d712b90dc81706
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 17:54:41 2026 +0100
+
+    serve s3: apply --metadata-max-objects to each user separately
+    
+    The metadata of the objects of all users was kept in one store, so with
+    --auth-proxy or several --auth-key credentials one user storing the
+    metadata of many objects could make the server forget that of every
+    other user.
+    
+    Each user (each access key) now has a store of their own.
+    
+    (cherry picked from commit c2ce9a0bfb26b33e4a13eb3d7038c61dc62dcd85)
+
+commit 028f2b4568f36d78e20cf0bcb3507c0118fbc889
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 17:48:35 2026 +0100
+
+    serve s3: apply the multipart upload limits to each user separately
+    
+    --multipart-max-uploads and --multipart-streaming-buffer-total limited
+    the uploads of all users together, so with --auth-proxy or several
+    --auth-key credentials one user could use up the limits and stop every
+    other user uploading.
+    
+    They now limit the uploads of each user (each access key) separately.
+    
+    (cherry picked from commit b1657092d36ab834c38f6c86144d6e8d4b3c5be6)
+
+commit 62e770eb54bd1a4d93131cc5d2cd6ab3e273e58f
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 17:44:17 2026 +0100
+
+    serve s3: fix multipart upload corruption if the backend write of an early part fails
+    
+    A multipart part which arrives before the parts ahead of it is buffered
+    and acknowledged to the client, then written to the backend when its
+    turn comes. If that write failed the part was dropped, possibly with
+    some of it already written, but the upload carried on as if nothing
+    had happened, so it could be completed with the part missing, or with
+    a resend of the part appended to the partial data.
+    
+    Such an upload is now failed, so the client starts it again.
+    
+    (cherry picked from commit 5379bd54097dbba5d61aae2b281adceacd5a13d2)
+
+commit 652bbb09081072485a242c92077f6e4ee3c9e3e0
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 12:53:52 2026 +0100
+
+    serve s3: fix presigned URL being turned into a copy of any object GHSA-w3h7-jxxq-vfrp CVE-PENDING
+    
+    The SigV4 verification in gofakes3 only checked the headers the
+    client listed as signed and never looked at the other headers which
+    arrived. A presigned PUT URL signs only the host header, so a holder
+    of one could add an unsigned x-amz-copy-source header and have the
+    server copy any object it can reach - in any bucket, and in any
+    remote when serving a cloud backend - into the object the URL names,
+    then read it back with the same URL. This affected both --auth-key
+    and --auth-proxy. AWS refuses such a request with AccessDenied, as
+    it requires every x-amz-* header to be signed.
+    
+    This updates gofakes3 to a version which refuses requests carrying
+    an x-amz-* header not in their signed headers list with AccessDenied,
+    and adds tests that a presigned PUT URL can't be turned into a copy
+    in either auth mode. Real S3 clients always sign x-amz-* headers so
+    they are unaffected.
+    
+    (cherry picked from commit c3b582ccdf53776714e6e6d445ba0267e2fcc46d)
+
+commit 4df376e2db92cdf3ed169ce612cf17129a942fa7
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:57:28 2026 +0100
+
+    serve s3: test multipart buffer limits can't be bypassed by overflowing part sizes GHSA-qjw8-8hmp-c3m6
+    
+    In v1.75 the multipart reorder buffer admitted the next part the stream
+    needed however big, adding its client-declared length to the running
+    total unchecked. Two concurrent requests for the next part declaring
+    huge lengths overflowed the total negative, after which out-of-order
+    parts were admitted past --multipart-streaming-buffer-limit.
+    
+    The next part is now streamed straight to the backend without being
+    charged to the buffer, and a buffered part is only admitted if it fits
+    in what is left of the limits, so this can no longer happen. Add a
+    test of the attack against both the per-upload and server-wide limits.
+    
+    (cherry picked from commit d120b5fe0bcbc016149533a5af6931d76643635e)
+
+commit 68e43e5b884b3b0f103059230bb789ec82b750ff
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 18:47:16 2026 +0100
+
+    serve s3: document memory use and bring the docs up to date
+    
+    Add a section on the memory serve s3 uses and how to limit it, and
+    update the docs for the recent changes to multipart uploads, listings
+    and metadata.
+    
+    (cherry picked from commit da71a52714f51bad55ce8915555aceed77fd202c)
+
+commit 1dcc246e03f48d3e2abdff263fca5cbc0d6098b9
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:31:08 2026 +0100
+
+    serve s3: fix stale metadata being returned for objects changed elsewhere
+    
+    serve s3 keeps the metadata of objects uploaded through it in memory.
+    If the object was then changed some other way - by another --auth-proxy
+    user sharing the backend, another server or directly on the backend -
+    serve s3 went on returning the old metadata, including the old
+    modification time, for the new object.
+    
+    The size and modification time of the object are now stored with its
+    metadata, which is ignored if they no longer match.
+    
+    (cherry picked from commit 221398e2d051e57e2177acac85b1145f12c70716)
+
+commit 4cc69c2a62d118c5bb9c357ee42a7f3b90ae4180
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:27:42 2026 +0100
+
+    serve s3: fix uploads failing when the auth proxy expires the user's backend
+    
+    With --auth-proxy the backend of each user is shut down once it has
+    been unused for 5 minutes. A request didn't count as using it, so a
+    long upload or download could have its backend shut down under it and
+    fail. A multipart upload used the backend it started on throughout, so
+    failed if the client paused for more than 5 minutes between parts, or
+    the auth proxy changed the user's secret.
+    
+    Each request and multipart upload now holds the backend it uses until
+    it is finished with it. In-progress multipart uploads are aborted when
+    the server is shut down so their backends are released.
+    
+    (cherry picked from commit 0edd92134ea751ecdd5e0c1f760b21ab4037fe38)
+
+commit 8d97a50c4a2afd35ddf6ccd97972f90b8e8e5878
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:22:35 2026 +0100
+
+    serve s3: stop auth proxy users listing or using each other's multipart uploads GHSA-35g6-9fjv-rmx5 CVE-PENDING
+    
+    With --auth-proxy each access key ID may be mapped to a different
+    backend, but gofakes3 kept a single record of multipart uploads for
+    everyone. Any user could list the uploads of every other user with
+    ListMultipartUploads (including their upload IDs) and the parts of
+    them with ListParts.
+    
+    With --disable-multipart-streaming the uploads are held by gofakes3,
+    whose upload IDs are sequential so easy to guess. Any user could
+    upload parts to, abort, or complete another user's upload - which
+    wrote it to the backend of the user completing it.
+    
+    This updates gofakes3 to a version which can keep each user's uploads
+    private and uses the access key ID as the owner.
+    
+    (cherry picked from commit 32b08f0237221fc3e2e3a0954b3b86b7dcff6818)
+
+commit 7c2405c035d283fb60c6145cd38a4115186b13b6
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:16:27 2026 +0100
+
+    serve s3: stop auth proxy users using each other's multipart uploads and metadata GHSA-35g6-9fjv-rmx5 CVE-PENDING
+    
+    With --auth-proxy each access key ID may be mapped to a different
+    backend, but serve s3 found a streaming multipart upload by its upload
+    ID alone and stored object metadata by path alone.
+    
+    A user who learnt another user's upload ID (for example from
+    ListMultipartUploads on a bucket of the same name) could upload parts
+    to, complete or abort that upload on the other user's backend. A user
+    with an object at the same bucket and key as another user was returned
+    the other user's metadata by HeadObject and GetObject and could
+    overwrite it.
+    
+    Keep the uploads and metadata of each access key ID apart.
+    
+    (cherry picked from commit a16a901de76a2c9b513d215fb1fd4eb9b3853787)
+
+commit 10335538d19153673b369f04cc2e833107c781f1
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:14:29 2026 +0100
+
+    serve s3: keep the state remembered for each user in one place
+    
+    Refactor the state serve s3 keeps between requests - in-flight
+    multipart uploads and object metadata - so that it is reached through
+    a tenant struct for the user making the request. This makes it
+    possible to keep users' state apart when they are serving different
+    backends.
+    
+    There is only one tenant for now, so there is no change in behaviour.
+    
+    (cherry picked from commit 2385e27cfd45e88f8d889ab54c6e708cfe1e4bca)
+
+commit a7b159920454bfc84810b9856a9d025a06d987c6
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 18:24:40 2026 +0100
+
+    serve s3: add --metadata-max-objects to limit the metadata kept in memory
+    
+    serve s3 keeps the metadata of the objects uploaded to it in memory,
+    with no limit on the number of objects, so memory use grew with every
+    object uploaded, and a client could use a lot by uploading many empty
+    objects with large metadata.
+    
+    The new --metadata-max-objects (default 100000, 0 for no limit) limits
+    the number of objects whose metadata is kept, forgetting the metadata of
+    the least recently used first. As the metadata is only kept in memory
+    it is already lost when the server restarts; the modification time is
+    stored on the object itself so is never lost.
+    
+    (cherry picked from commit 77ed639805edcca54311997922e041e2e57f70b4)
+
+commit 518f43dee927d7b1689d891b72c1a71ae9f8c3d2
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 18:21:30 2026 +0100
+
+    serve s3: forget expired multipart uploads completely
+    
+    When an abandoned multipart upload expired after --multipart-expiry,
+    gofakes3's record of it was left behind, so it stayed in memory and in
+    ListMultipartUploads until the server was restarted.
+    
+    That record is now removed too.
+    
+    (cherry picked from commit 0ce74ffaac93abd8cf9b6fbb4974dbe0d8a45d3c)
+
+commit 43d337446586bc637024e3d1ebb6fc1e40e41c3d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 18:19:55 2026 +0100
+
+    serve s3: update gofakes3 to limit the memory requests can use
+    
+    This picks up these fixes to serve s3 from gofakes3:
+    
+    - XML request bodies (CompleteMultipartUpload, DeleteObjects) bigger
+      than 10 MiB are rejected rather than read into memory.
+    - DeleteObjects requests with more than 1000 keys are rejected.
+    - CompleteMultipartUpload checks the upload exists before reading the
+      request body.
+    - With --disable-multipart-streaming, parts are no longer allocated at
+      their declared size before the data arrives.
+    - Browser POST uploads hold at most 1 MiB in memory and are limited to
+      5 GB.
+    
+    It also brings a SlowDown error, so the SlowDown replies serve s3 sends
+    when a part waits too long for buffer space, or too many multipart
+    uploads are in progress, now have status 503 as S3 does rather than
+    500.
+    
+    (cherry picked from commit f4c1268f3316465129cea6ef18f441b312ea48f8)
+
+commit 10875eec70b90c9e3a104bc0d51fe8ef6e7691ce
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:56:45 2026 +0100
+
+    serve s3: add --multipart-max-uploads to limit uploads in progress
+    
+    There was no limit on the number of multipart uploads in progress, and
+    each one holds server resources until it completes or expires - once it
+    has data, a VFS upload and the buffers of the remote's own upload - so a
+    client could use unbounded memory by starting many uploads.
+    
+    The new --multipart-max-uploads (default 1000, 0 for no limit) limits
+    the streamed multipart uploads in progress. Starting another fails with
+    SlowDown, which S3 clients retry, before anything is created on the
+    remote.
+    
+    With --multipart-expiry 0 nothing ever cleans up abandoned uploads, so
+    they go on counting towards the limit until no new upload can be
+    started. A warning is logged at startup when both are set.
+    
+    (cherry picked from commit d24568e3e6401fe14080a375527b1fdf0c842a87)
+
+commit 40eaa114c11aff529aa2674ddd4e7fcd82826d13
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:55:54 2026 +0100
+
+    serve s3: start the upload to the backend on the first multipart part
+    
+    Starting a multipart upload opened its VFS upload straight away, which
+    allocates a 100 KiB buffer (--streaming-upload-cutoff) and starts a
+    goroutine and a transfer, all held until the upload finished or was
+    expired after --multipart-expiry (default 24h). A client could make the
+    server hold about 100 KiB per tiny CreateMultipartUpload request.
+    
+    The VFS upload is now only opened when the first part is written to it,
+    so an upload with no parts holds none of these.
+    
+    (cherry picked from commit 7d2c16269dc570a7ad8c7cfa6e74c44395b4a370)
+
+commit a34b606abf5cbe4983cabdda670bfb8a7f3e1fef
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:54:55 2026 +0100
+
+    serve s3: add --multipart-streaming-buffer-total to limit memory across uploads
+    
+    --multipart-streaming-buffer-limit only limits the memory buffered for
+    parts arriving out of order in each upload, so a client could use as
+    much memory as it liked by starting more uploads.
+    
+    The new --multipart-streaming-buffer-total (default 1G, 0 for no limit)
+    limits the memory buffered by all uploads together. A part which would
+    take either over its limit waits as before. Since the part the stream
+    needs next is never buffered, every upload can still make progress.
+    
+    (cherry picked from commit 87d81fcb2e41636eac371e5f2a733ab2d5fce6c3)
+
+commit 37aa0cb629c17df671adcedbd588b918f523ffa9
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:53:48 2026 +0100
+
+    serve s3: stream in-order multipart parts without buffering them
+    
+    Every multipart part was buffered in memory in full before being written
+    to the backend, even the part the stream needed next. There is no limit
+    on part size, and several concurrent requests for the current part were
+    each admitted, so a client could make the server hold as much memory as
+    it sent, whatever --multipart-streaming-buffer-limit was set to.
+    
+    The part the stream needs next is now written straight through to the
+    backend as it arrives, so only parts which arrive ahead of their turn
+    are buffered, and those always within the limit - a part bigger than
+    the limit waits until it is the next part rather than being admitted
+    when the buffer is empty. Further requests for the part being streamed
+    wait, holding no memory, and are then checked against it.
+    
+    Since what reaches the backend can't be taken back, a part whose body
+    fails part way records how far it got, and the client's retry of the
+    part, which must have the same content, carries on from there. Such an
+    upload can't be completed without the rest of the part.
+    
+    The body is read to its end, so that an error it only reports there -
+    as the Content-MD5 check does - fails the part rather than being
+    missed, and a body longer than declared is rejected. A part rejected
+    once it has been streamed leaves data which can be neither completed
+    nor replaced, so the whole upload is failed and cleaned up and the
+    client starts again.
+    
+    (cherry picked from commit 7773bb64878714930d136c41b26e6440d8cdf02a)
+
+commit a7f0259e55d66c996015d4d572267505fa31fff4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:47:53 2026 +0100
+
+    serve s3: time out multipart parts waiting for buffer space
+    
+    A part waiting for room in the out-of-order buffer waited forever,
+    ignoring the request being cancelled, and a waiting part stopped its
+    upload being expired, so a client could hold requests, goroutines and
+    uploads open indefinitely.
+    
+    The wait now ends when the request is cancelled, and after a minute the
+    part fails with SlowDown so the client retries it later.
+    
+    (cherry picked from commit 603e6238eb20cfe3e023f1cf8e6dadabc485e053)
+
+commit 323b0b4559b0f5606e353f5362a04cad5818d8f4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:47:08 2026 +0100
+
+    serve s3: don't buffer re-uploads of multipart parts already streamed
+    
+    A part uploaded again after it had been streamed to the backend (a
+    client retrying after a timeout) was buffered in memory in full just to
+    compare it with the original, and the buffer limit didn't apply to it.
+    
+    Such a re-upload is now hashed as it is received and compared with the
+    original without being buffered.
+    
+    (cherry picked from commit 122b4e8df20a233e73f423563152958ce2e37e78)
+
+commit 26175553a77e11e1b0da35ad6c8815a61f8a87ca
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 17:46:23 2026 +0100
+
+    serve s3: count buffered multipart parts in whole memory pages
+    
+    The out-of-order multipart buffer was charged the declared length of
+    each part, but a buffered part occupies whole 1 MiB pool pages however
+    small it is. A client could therefore send up to 10000 one-byte parts
+    ahead of the part the stream needed and pin about 10 GiB of memory in a
+    single upload while --multipart-streaming-buffer-limit saw only 10 KB.
+    
+    Each buffered part is now charged the whole pages it occupies.
+    
+    (cherry picked from commit 4aa3c41aa1d907daf15f93e691c8644aad21517d)
+
+commit 4a944dff0f01afb72d6da3b382659e38e82d9169
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 17 17:40:56 2026 +0100
+
+    webdav: fix headers option leaking to other hosts on redirect GHSA-3rqf-7h69-gg5v CVE-PENDING
+    
+    The headers set with the `headers` option were sent to any host the
+    server redirected to, as net/http only strips Authorization and Cookie
+    on a cross domain redirect and copies every other header onto each
+    hop. A server which could be made to redirect to another host would
+    therefore receive any credential carried in a custom header such as
+    X-Auth-Token.
+    
+    Strip the configured headers from a redirect hop once the chain has
+    left the configured host (a different hostname, subdomain or port)
+    using rest.StripHeadersOnCrossHostRedirectFn. This logs at debug level
+    when it happens so a 401 from the redirect target can be diagnosed.
+    The `auth_redirect` option is unchanged as it is an explicit opt-in to
+    keep credentials across redirects.
+    
+    The Authorization header set from `user`, `pass` and `bearer_token` is
+    deliberately left to net/http's policy, which strips it on a change of
+    domain but keeps it for a subdomain or a different port, as servers
+    which redirect to a subdomain rely on that today.
+    
+    (cherry picked from commit 224a515d68946677fcde6fdc596252e377fc1bff)
+
+commit e9b9b48a6888f9bdc74bbcced6d87d58e6b1ca28
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 11:09:01 2026 +0100
+
+    docs: fix release verification instructions trusting unsigned hashes
+    
+    The manual release verification steps checked the signature with gpg
+    --verify and then checked the binaries against the whole SHA256SUMS
+    file. gpg only verifies the clearsigned part, so an unsigned hash line
+    added outside it would be used by sha256sum -c or by rclone hashsum -C.
+    
+    The instructions now extract the signed hashes with gpg --decrypt and
+    check the binaries against those only.
+    
+    See: GHSA-w33h-3qgq-8mv8
+    (cherry picked from commit 204adfeedcae664e9b9e8c4a26ed146080a9bab9)
+
+commit 3a14789eb48cc4aa6e1d7d58268912dbd578160c
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 10:22:20 2026 +0100
+
+    selfupdate: fix hash check trusting unsigned data in the signed SHA256SUMS GHSA-w33h-3qgq-8mv8 CVE-PENDING
+    
+    rclone selfupdate checked the PGP signature on the clearsigned block
+    of SHA256SUMS but then looked up the archive hash in the whole
+    downloaded file. Unsigned data can appear in that file without
+    invalidating the signature. A hash line placed before or after the
+    signed text was accepted, allowing whoever controlled the download to
+    install an arbitrary unsigned archive.
+    
+    The hash is now only looked up in the signed text.
+    
+    Affects stable (non --beta) selfupdate since v1.55.0. --beta updates
+    are not signature checked.
+    
+    (cherry picked from commit 672bbf75ec7c530e52ddad3fe1d3e06acdf6ea1e)
+
+commit 47027efd12d469b0aeaa25c64ee7ed0574a26f2b
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 14 17:37:54 2026 +0100
+
+    fshttp: drop --header values over HTTP after HTTPS downgrade GHSA-rrwf-2qr6-p832 CVE-PENDING
+    
+    The transport strips the headers set with --header once a redirect
+    chain leaves the originally requested host, but the host comparison
+    ignores the URL scheme. A server which redirects https://host:8443/
+    to http://host:8443/ keeps the same host and port, so the headers
+    were added to the plaintext request and could be read by anyone on
+    the network path.
+    
+    The redirect chain walk now also treats a hop which downgrades the
+    original HTTPS request to HTTP as leaving the host, so the headers are
+    removed from that hop and every one after it.
+    
+    The transport also logs at debug level when it removes the headers,
+    for either reason, so that a resulting 401 from the redirect target
+    can be diagnosed.
+    
+    (cherry picked from commit bc1050bc8a8e0fa6779c8eb63728cf8d8446289f)
+
+commit 2f43b99abe8b0eb60404d8ed4c79a15eaa1cb817
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 14 17:16:36 2026 +0100
+
+    vfs: fix serve nfs path traversal by refusing unsafe file names GHSA-44pm-2q5p-fm63 CVE-PENDING
+    
+    Dir.Create, Dir.Mkdir and Dir.Rename joined whatever name they were
+    given onto the directory's path. A name of "..", "." or one containing
+    a "/" isn't a child of the directory, and at the VFS root
+    path.Join("", "..") preserves the ".." so the new node's path pointed
+    outside the root. Backends which join the Fs root with the remote then
+    resolved it to a location above the directory the VFS was created on.
+    
+    serve nfs was exploitable through this. The go-nfs library refuses a
+    name of exactly "." or ".." in MKDIR only, doesn't check the name in
+    CREATE, RENAME or SYMLINK, and never refuses a name containing a "/".
+    
+    serve webdav was exploitable in the same way and has its own fix. The
+    other serve front-ends rely on their own or their protocol library's
+    path cleaning to keep such names out of the VFS.
+    
+    Reject such names with EINVAL in the VFS itself, so that every
+    front-end and mount is protected regardless of what the layer above it
+    checks. This is the fix for serve nfs and defence in depth for the
+    others. The serve webdav check is kept as the front-end is the trust
+    boundary and gives the client a clear error. The source name of a
+    rename is only used to look the node up so it isn't checked.
+    
+    VFS.Mkdir of the root, which previously went through Dir.Mkdir with an
+    empty name and added a nameless child node to the root, now makes the
+    root directory on the backend directly, still honouring --read-only.
+    serve webdav and serve ftp made directories through Dir.Mkdir rather
+    than VFS.Mkdir, so they are switched to VFS.Mkdir to keep "MKCOL /" and
+    "MKD /" working.
+    
+    (cherry picked from commit 3739ad9c35b99b2716482bcdce72ee338ed4adc7)
+
+commit 133ced103a4eba313fb1c639f098212daee5d707
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 14 17:10:48 2026 +0100
+
+    serve webdav: fix path traversal above the served directory GHSA-44pm-2q5p-fm63 CVE-PENDING
+    
+    A request path with a ".." element, such as "MKCOL /..", was passed
+    straight through to the VFS. At the VFS root path.Join("", "..")
+    preserves the "..", so a directory node with the path ".." was added
+    under the root and every path built beneath it started "../". Backends
+    which join the Fs root with the remote before encoding it - such as
+    webdav, ftp, sftp, http and memory - resolved that "../" away, letting
+    an unauthenticated client create, overwrite, copy, move and delete
+    objects and directories outside the directory rclone was told to serve.
+    Moving a directory or file from outside the served tree into it also
+    made it readable.
+    
+    Reject any request with a "." or ".." element in the request path, or
+    in the Destination header of COPY and MOVE, with 400 Bad Request. The
+    check is made once in ServeHTTP rather than in each webdav.FileSystem
+    method so that the client gets a consistent error. Rejected requests
+    are logged at INFO level like other requests.
+    
+    The webdav handler strips --baseurl from the Destination as a string
+    prefix, so "/base../x" reaches the FileSystem as "../x". The Destination
+    is therefore checked after stripping the prefix in the same way.
+    
+    (cherry picked from commit c266a63ced8aaaaa73a7210612c8e8094d4b2f55)
+
+commit 317c885857ce96aa6c3cc23c7682e881e39ac28e
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 17:30:26 2026 +0100
+
+    netstorage: stop a listing resume token moving signed requests to another host GHSA-xqmq-v4wj-rw5m CVE-PENDING
+    
+    The resume start value returned by the NetStorage list API is joined
+    onto the endpoint URL as a URL reference to build the next listing
+    request. A value beginning with `//` is a network-path reference, so a
+    server (or an on-path attacker when `protocol = http`) which returns
+    `//other.example/path` could make rclone send the next request, signed
+    with the account secret, to a host other than the configured one.
+    
+    Use rest.URLJoinRoot so the resume token can only change the path.
+    
+    (cherry picked from commit c8dfd98b0c6779e9032976952362e7eddf3d00ad)
+
+commit a34f1f153a16b30dcffe835b7c5b86ef5a003cd8
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 17:09:28 2026 +0100
+
+    netstorage: stop a path starting with // moving the remote to another host GHSA-xqmq-v4wj-rw5m CVE-PENDING
+    
+    The netstorage backend joins the path after `remote:` onto the
+    configured host URL according to the URL standard. A path beginning
+    with `//` is a network-path reference under that standard, so a path
+    such as `//other.example/dir/` replaced the configured host (and port
+    and userinfo) rather than being treated as a path. Every request,
+    including the initial stat, was then signed with the account secret and
+    sent to the substituted host. The signature covers the request path and
+    action but not the host, so the substituted host received signatures
+    valid for replay against the real NetStorage endpoint for the duration
+    of their validity.
+    
+    Use rest.URLJoinRoot, which refuses any root that changes the scheme,
+    host or userinfo of the configured URL.
+    
+    (cherry picked from commit 4f28f4492cf5ee3a0ec64ea4e2e01031abfdf490)
+
+commit e7d4d425bcdb542055689626ee2fe9487173241e
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 10 17:21:56 2026 +0100
+
+    http: stop a path starting with // moving the remote to another host GHSA-xqmq-v4wj-rw5m CVE-PENDING
+    
+    The http backend resolves the path after `remote:` against the
+    configured url according to the URL standard. A path beginning with
+    `//` is a network-path reference under that standard, so a path such as
+    `//other.example/dir/` replaced the configured host (and port and
+    userinfo) rather than being treated as a path. The configured headers
+    were then sent to the substituted host on the initial HEAD request and
+    every request after it.
+    
+    Use rest.URLJoinRoot, which refuses any root carrying a scheme, host
+    or userinfo of its own, to join the path onto the configured url.
+    
+    (cherry picked from commit ecd821243f71a85856618d68cadbf82c21f18f5b)
+
+commit 01a9d67e0650434215f55968d05f9cd9092d3886
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 10 17:42:17 2026 +0100
+
+    fstests: check a root starting with // can't move the remote to another host GHSA-xqmq-v4wj-rw5m CVE-PENDING
+    
+    Add an integration test which starts a listener on localhost, makes
+    the remote with roots naming that listener and checks that nothing
+    connects to it. The listener replies with junk so a backend which does
+    connect fails at once rather than retrying a closed connection.
+    
+    (cherry picked from commit f33fa3872f3a8ceb2d196f8ed6c4d0c014e09120)
+
+commit aece53963a611adea89cd5d312ede15b07292e21
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 10 17:21:56 2026 +0100
+
+    rest: add URLJoinRoot to join a path onto a URL without changing its host GHSA-xqmq-v4wj-rw5m CVE-PENDING
+    
+    rest.URLJoin resolves its path as a URL reference according to the URL
+    standard, so a path beginning with `//` is a network-path reference
+    which replaces the host (and port and userinfo) of the base URL. That
+    is often the wrong behaviour.
+    
+    Add rest.URLJoinRoot which joins an unescaped root onto a base URL and
+    refuses any root which parses with a scheme, host or userinfo of its own.
+    
+    (cherry picked from commit 28562c8a79dd0a32a44f45914dba16bfcd6ee545)
+
+commit 291016ea7501e03ecaef88c2ad44c52c33f77e2c
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 13:03:35 2026 +0100
+
+    lib/http: require authentication for OPTIONS requests GHSA-gj73-fh6v-92fj CVE-PENDING
+    
+    Before this change the basic, htpasswd and auth proxy authentication
+    middlewares let every OPTIONS request through without checking
+    credentials so that browser CORS preflights, which can't carry
+    credentials, would succeed.
+    
+    However in serve webdav the OPTIONS request is answered by the WebDAV
+    handler whose Allow header depends on whether the path is an existing
+    file, an existing directory or doesn't exist, so an unauthenticated
+    client could discover the existence and type of any path on the served
+    remote even with --user/--pass or --htpasswd set.
+    
+    After this change he authentication middlewares no longer special-case
+    OPTIONS. Instead the CORS middleware, which runs before authentication
+    and owns the --allow-origin setting, answers genuine CORS preflights
+    itself with an empty 200 carrying the CORS headers only when
+    --allow-origin is set.
+    
+    All other OPTIONS requests need credentials like any other method, so
+    clients which probe with OPTIONS before authenticating will get a 401
+    challenge and must retry with credentials.
+    
+    (cherry picked from commit 25707f2dc632556455e0a4694eb4843d4a134cee)
+
+commit 7e57142de1e647a9056d5262044378d7d8504f22
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 13:37:04 2026 +0100
+
+    pcloud: only accept pCloud hosts from the hostname in the OAuth callback
+    
+    When pCloud redirects the browser back to rclone's local OAuth
+    callback server it adds a `hostname` parameter saying which regional
+    API host (api.pcloud.com or eapi.pcloud.com) the account lives on.
+    rclone used this for the token exchange and saved it in the config as
+    the host for all of the remote's later traffic, without checking it.
+    
+    This only accepts a well formed hostname within pCloud's own domain,
+    lower cased, failing the config with an error otherwise, and adds a
+    unit test for the check. This is defence in depth for GHSA-hvpr-p4pv-4f46
+    
+    (cherry picked from commit 3760671b36c8216bea05de53962c6893f7a248a8)
+
+commit 722c14d806f5945970c83801d2bfb5c7ffc288af
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 13:24:21 2026 +0100
+
+    pcloud: fix OAuth config accepting callbacks without state GHSA-hvpr-p4pv-4f46 CVE-PENDING
+    
+    The local web server which receives the OAuth callback during
+    `rclone config` and `rclone authorize` checks that the `state`
+    parameter matches the random value rclone generated when starting the
+    flow. The pcloud backend opted out of this check with the
+    `StateBlankOK` option in lib/oauthutil, which made the local server
+    accept a callback with no state at all.
+    
+    The callback URL (http://127.0.0.1:53682/) is fixed and well known,
+    so while a pcloud OAuth flow was in progress any web page open in the
+    user's browser could complete it with a single cross-site request
+    carrying an attacker's authorization code. This is a CSRF
+    (CWE-352) on the auth callback.
+    
+    This commit removes the `StateBlankOK` option so that every callback
+    must carry the correct state and adds a test that the local auth
+    server rejects callbacks with a blank, missing or wrong state.
+    
+    The option was added in May 2020 (#4210) because pCloud briefly
+    omitted the state parameter from its redirect. The callbacks recorded
+    five weeks later when EU region support was added show both
+    api.pcloud.com and eapi.pcloud.com returning `state=` again, so the
+    exemption has been unnecessary since then.
+    
+    See: GHSA-hvpr-p4pv-4f46
+    (cherry picked from commit a53fdac5ec1f7b5aa0af38e9cd937e6419a91e70)
+
+commit 89b8a59e8b86efbc4a35ad447ac9b93a20f50ec5
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 15:45:45 2026 +0100
+
+    vfs: stop --links objects called "...rclonelink" appearing as ".." in directory listings
+    
+    When reading a directory with --links the VFS skipped entries called "."
+    and ".." before removing the ".rclonelink" suffix, so an object called
+    "...rclonelink" (or "..rclonelink" or ".rclonelink") produced a directory
+    entry called ".." (or "." or "") whose path resolved to the parent
+    directory. The same happened for names added back from the VFS cache.
+    
+    The check is now done after the suffix is removed.
+    
+    See GHSA-55qp-jrwr-x827
+    
+    (cherry picked from commit 93ba2d40f094f3dcc49ede2e686ccde642dfed75)
+
+commit 1b500594d37830410282c5af6967a4b3760fe373
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 15:45:11 2026 +0100
+
+    local: fix .rclonelink names escaping the root with --links GHSA-55qp-jrwr-x827 CVE-PENDING
+    
+    In --links mode the local backend checked that a source name stayed inside
+    the destination root and only then removed the ".rclonelink" suffix from the
+    resulting OS path. A source entry called "...rclonelink" passed the check and
+    was then trimmed to "..", so the object addressed the parent of the
+    destination the user chose.
+    
+    Writing the content of such an entry was already refused, as it is done
+    through an os.Root, but metadata was not: with --metadata rclone rewrote the
+    timestamps, ownership and extended attributes of the directory above the
+    destination from values supplied by the source.
+    
+    The suffix is now removed from the remote name before it is joined to the
+    root, so the containment check applies to the name that is actually used. A
+    translated link must also leave a real native file name once the suffix is
+    removed.
+    
+    A regular file whose name is exactly ".rclonelink" (or "..rclonelink" or
+    "...rclonelink") is not a valid translated link and is now skipped in
+    directory listings.
+    
+    (cherry picked from commit 4d1bd4c71dbeaad3525933225cadb0d589e85791)
+
+commit 9b495f2717ce522d351210fea5fab7eede65c6ea
+Author: Dhevenddra <dhevg20020402@gmail.com>
+Date:   Thu Aug 27 16:33:10 2026 +0530
+
+    test: skip the symlink tests when the platform won't allow symlinks
+    
+    Nine tests fail on an ordinary Windows machine, eight in backend/local and
+    TestEnvironmentVariables in cmdtest, all with
+    
+        symlink file.txt \?\C:\Users\...\symlink.txt: A required privilege is not
+        held by the client.
+    
+    Windows grants SeCreateSymbolicLinkPrivilege only to an elevated process or one
+    running with Developer Mode enabled, and a default install gives an ordinary
+    user neither. CI does not see this because the windows-latest runner is
+    elevated, so the failures only show up on a contributor's own machine, where
+    AGENTS.md asks for make quicktest to pass before opening a pull request.
+    
+    cmdtest already recognised the situation and attached a note to the failure
+    saying the test could safely be ignored. If it is safe to ignore then the test
+    knows it cannot run, so skip it and say why instead.
+    
+    backend/local gains a helper that tries a symlink in t.TempDir() and skips if it
+    cannot make one, called from the six tests that need the privilege. Where a
+    platform can create symlinks the probe succeeds and nothing is skipped, so other
+    platforms are unchanged.
+    
+    TestMetadata is skipped whole because it creates its symlink before anything
+    else and the object built from it is used throughout.
+    TestSymlinkEscapeConcurrent is left alone: it goes through putLink and ignores
+    the error, so it never needed the privilege.
+    
+    (cherry picked from commit 5fc1cc3ca1c39f2c3cdec37089491b1e5aa3564e)
+
+commit f6290108df1b1f82c649a325b944a5089afc80e3
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 15:45:01 2026 +0100
+
+    local: fix directories named *.rclonelink being treated as links with --links
+    
+    In --links mode the local backend removed the ".rclonelink" suffix from
+    directory names as well as file names when building the OS path. Only files
+    are ever translated into symlinks, so a directory called "sub.rclonelink"
+    addressed the sibling "sub" instead: listing it logged "Failed to read link
+    size", its metadata was read from the wrong place, and setting metadata on
+    it with --metadata failed or landed on the sibling.
+    
+    Directories now use their name as is, whatever suffix it has, in the same
+    way DirSetModTime already does.
+    
+    (cherry picked from commit a7ef4c90648a7d29eba40d48c63273b5528abfe9)
+
+commit ed9f1d836e694bc23eef1fe4c3db81545d47c6d9
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 11:25:43 2026 +0100
+
+    b2: fix account token and SSE-C key leaking on redirects from --b2-download-url GHSA-gpw7-77cq-9f72 CVE-PENDING
+    
+    Every file download sends the live account authorization token and,
+    when configured, the SSE-C customer key headers to the download host.
+    With --b2-download-url that host is a CDN or proxy the user does not
+    operate, and the http client followed its redirects with Go's default
+    policy:
+    
+    - Go only strips Authorization when the redirect target is not the same
+      host or a subdomain, and never looks at the scheme, so a same-host
+      HTTPS to HTTP redirect replayed the full-capability B2 token in
+      cleartext.
+    - Go has no idea that the X-Bz-Server-Side-Encryption-Customer-* headers
+      carry the customer encryption key, so it forwarded them to any
+      redirect target including a different host.
+    
+    The B2 client now uses rest.StripHeadersOnCrossHostRedirectFn, so it
+    refuses to follow a redirect which downgrades HTTPS to HTTP and strips
+    the Authorization and SSE-C headers from any redirect which leaves the
+    host and port of the original request, matching the protection already
+    given to the S3, WebDAV and HTTP backends.
+    
+    Fixes GHSA-gpw7-77cq-9f72
+    
+    (cherry picked from commit 30009599e4e5ffc06451a0ea46d1ca12b7211050)
+
+commit 59ea591bcb34f443d248d68b8991a7a96dfd29c4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 9 11:25:16 2026 +0100
+
+    rest: add StripHeadersOnCrossHostRedirectFn and use it in the s3 and http backends
+    
+    The s3 and http backends each carried their own copy of the same
+    CheckRedirect policy. This moves it into lib/rest as
+    StripHeadersOnCrossHostRedirectFn, so that any backend which sends
+    credentials in headers to a host it does not control can use the same
+    policy. It logs at debug level when it strips headers so that a
+    resulting 401 from the redirect target can be diagnosed. A header
+    starting with "*" is matched without canonicalising, as that is how
+    SetHeader and Opts.ExtraHeaders send it.
+    
+    This changes the s3 policy in two edge cases:
+    
+    - It compared the raw URL host string, so a redirect to the same host
+      in different case or with an explicit default port stripped the
+      credentials. It now uses SameHost like the http backend, which treats
+      those as the same host.
+    - The downgrade check compared each hop with the previous one. It now
+      compares with the original request like the other backends, so a
+      chain which starts on plaintext HTTP may return to it.
+    
+    The behaviour tests move to lib/rest. The backend tests which check the
+    policy is wired into each client are kept.
+    
+    (cherry picked from commit cae10713e8e400ce6131a4970445ff8573a23bdf)
+
+commit 2cc9088374e37eb9865313109b0a7983be8c917f
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Oct 8 18:09:22 2026 +0100
+
+    build: fix multiple CVEs by upgrading to go1.26.9
+    
+    - CVE-2026-97032: net/http: HTTP/2 server crash due to HPACK encoder race
+    - CVE-2026-78659: net/http: HTTP/2 server memory exhaustion due to Trailer headers
+    - CVE-2026-97031: crypto/tls: reject malformed ECH outer extension references
+    - CVE-2026-94444: cmd/go: checksum bypass for golang.org/fips140
+    - CVE-2026-94447: cmd/go: checksum database bypass for golang.org/toolchain
+    - CVE-2026-94448: html/template: reset context tracking on consecutive template expressions
+    - CVE-2026-97030: html/template: recognize |yield| as regexp preceder keyword
+    - CVE-2026-94440: net/textproto, mime/multipart: memory limit bypass when parsing MIME headers
+    - CVE-2026-56866: net/http: HTTP/1 client connection desynchronization after CONNECT rejection
+    - CVE-2026-94439: net/http: HTTP/1 server connection desynchronization after 2xx CONNECT response
+    - CVE-2026-78669: net/http: excessive CPU consumption from repeated initial window changes
+    - CVE-2026-78660: net/http: HTTP/2 transport accepts malformed framing-related headers
+    - CVE-2026-56857: os: Root.Mkdir(All) can follow junctions out of the root on Windows
+    - CVE-2026-78667: net/http: lack of limit on size of parsed Range headers
+    - CVE-2026-78663: net/http: double flow control refund on HTTP/2 server streams
+    
+    This also updates the go1.26 test job to go1.26.9.
+
+commit d8dbeb9de430b55cf93b86b655fddcfa79ff6409
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Oct 9 00:01:30 2026 +0100
+
+    operations: remove --copy-dest --immutable test for single file copy
+    
+    TestCopyFileCopyDestImmutable relies on --immutable being enforced for
+    copyto, moveto and single file copies, which v1.75 doesn't do, so it
+    failed wherever the remote supports server-side copy, such as the
+    local backend on macOS.
+    
+    The --copy-dest --immutable fix it was picked with still applies to
+    sync and copy and is tested by TestSyncCopyDestImmutable.
+
+commit 9cf1af177a16b2e079759d4c8450a602103708ad
+Author: James Truitt <80006053+jtruitt1@users.noreply.github.com>
+Date:   Tue Oct 6 10:13:46 2026 -0400
+
+    docs: fix formatting error in Google Drive docs
+    
+    (cherry picked from commit 2debe0ae6a78cb74701ffca65c7098a8a7052f70)
+
+commit bb42b076af0277f7116031d78a0a7df41206afdb
+Author: kaii9 <107882135+kaii9@users.noreply.github.com>
+Date:   Sat Oct 3 01:27:44 2026 +0800
+
+    serve restic: fix repositories named data - fixes #6086
+    
+    (cherry picked from commit 9823661bb817c7488fa49b230d701f69d838d9c9)
+
+commit 099202479111a32fb9784bad07faa0da3d9e7cc3
+Author: kaii9 <107882135+kaii9@users.noreply.github.com>
+Date:   Sat Oct 3 02:13:57 2026 +0800
+
+    accounting: keep speed averaging active when transfers overlap
+    
+    (cherry picked from commit aa308e3d7c920684c6ed4074a0c4712568e3bedf)
+
+commit 48ac01c2b8d4f932bf823c362fd5810d6072114f
+Author: somaz <genius5711@gmail.com>
+Date:   Tue Sep 29 11:37:39 2026 +0900
+
+    mount: fix --daemon failing when --rc is enabled - fixes #9196
+    
+    Before this change the parent process kept the remote control and
+    metrics servers it started in initConfig listening, so the daemon child
+    could not bind the same addresses and exited.
+    
+    After this change the parent shuts those servers down just before
+    daemonizing, and the child starts them as usual.
+    
+    (cherry picked from commit 4532a888387ba3713c08a935dfdf18b1139866ea)
+
+commit b928e8ddd0264bf05120b7f285f6a8fd3c40d6be
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 12:04:03 2026 +0100
+
+    serve: fix --auth-proxy backends never being shut down after simultaneous logins
+    
+    With --auth-proxy, when several logins with the same credentials
+    arrived together and none was in the cache yet, as when an FTP client
+    opens several connections at once, each one ran the auth proxy program
+    and took its own reference to the backend. Only one of them was
+    remembered, so the others were never given back and the backend was
+    never shut down.
+    
+    Logins which arrive together now share one run of the auth proxy
+    program and one reference to the backend.
+    
+    (cherry picked from commit 2e9c06c84d9ef5bae601e0f214ea874d2757faa9)
+
+commit 9ac7855da951828603941756746a4c224022979d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 11:17:45 2026 +0100
+
+    serve: fix --auth-proxy stopping VFS cache uploads after 5 minutes
+    
+    With --auth-proxy the backend of each user is shut down once it has
+    been unused for 5 minutes. With --vfs-cache-mode writes or full, files
+    are uploaded to the backend after the transfer which wrote them has
+    finished, which didn't count as a use. So an upload which hadn't
+    finished 5 minutes after the user's last command (or disconnection for
+    serve sftp) was stopped, leaving the file in the VFS cache but not on
+    the backend.
+    
+    The backend is now kept until it has no files open for write and
+    nothing in the VFS cache waiting to be uploaded.
+    
+    This was introduced in v1.75.1 by
+    
+    f425f8d46 serve: refactor VFS and proxy handling into Provider
+    
+    (cherry picked from commit 0caf24af505802a10ce384ae1d87007c554e7d22)
+
+commit 5d20bd2832a62eaa6b93c0a116e272ee82ffa5c4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 11:17:45 2026 +0100
+
+    vfs: add Busy to tell if a VFS still has data to write
+    
+    Busy returns true if the VFS has files open for write or files in the
+    VFS cache which are open or waiting to be uploaded. It is for code
+    which wants to shut a VFS down only once that wouldn't lose any work.
+    
+    (cherry picked from commit 4fa2a5b02cf29bc246ecd2049ecf64e97fe9a51d)
+
+commit 2f84013eec41c4cef3a71c7fff6417b1a1778024
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 11:17:45 2026 +0100
+
+    lib/cache: add SetCanExpire to keep entries which are still busy
+    
+    An entry is expired when it hasn't been used for a while, but the user
+    of the cache may know it is still doing something in the background.
+    SetCanExpire sets a function which is asked before expiring an entry
+    and can keep it in the cache until it is ready to go.
+    
+    The function is called without the cache locked as it may take a
+    while, so an entry which is used in the meantime isn't expired.
+    
+    (cherry picked from commit 49d8566ec5c8e661b2c5bd72212b263c716aae50)
+
+commit 675f9c3684fb7c34c1741930c41a284f4f732173
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 10:29:28 2026 +0100
+
+    serve webdav: fix transfers failing after 5 minutes with --auth-proxy
+    
+    With --auth-proxy the backend of each user is shut down once it has
+    been unused for 5 minutes. Only the start of each request counted as a
+    use, so an upload or download lasting longer than that had its backend
+    shut down under it and failed.
+    
+    Each request now holds the backend it uses until it has been served.
+    
+    This was introduced in v1.75.1 by
+    
+    f425f8d46 serve: refactor VFS and proxy handling into Provider
+    
+    (cherry picked from commit 7e6d6fa838a8d4f69658f46a3ef908a75267a007)
+
+commit b8a697888cc895b37b3f476a0f599f231021b9cd
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 10:29:28 2026 +0100
+
+    serve http: fix downloads failing after 5 minutes with --auth-proxy
+    
+    With --auth-proxy the backend of each user is shut down once it has
+    been unused for 5 minutes. Only the start of each request counted as a
+    use, so a download lasting longer than that had its backend shut down
+    under it and failed.
+    
+    Each request now holds the backend it uses until it has been served.
+    
+    This was introduced in v1.75.1 by
+    
+    f425f8d46 serve: refactor VFS and proxy handling into Provider
+    
+    (cherry picked from commit 8457da3c8abb629f745ce101e7f28eed2c9f1cc8)
+
+commit dddf808b47f3c6eafb14c48f99ec51ac53f3e18a
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Oct 6 10:29:28 2026 +0100
+
+    serve ftp: fix transfers failing after 5 minutes with --auth-proxy
+    
+    With --auth-proxy the backend of each user is shut down once it has
+    been unused for 5 minutes. Only the start of each FTP command counted
+    as a use, so an upload or download lasting longer than that had its
+    backend shut down under it and failed with "context canceled".
+    
+    Each FTP command now holds the backend it uses until it has finished,
+    which for a download is when the file is closed.
+    
+    This was introduced in v1.75.1 by
+    
+    f425f8d46 serve: refactor VFS and proxy handling into Provider
+    
+    (cherry picked from commit ee0a70f875e8fa17239d7f04fc80dc64be4c019b)
+
+commit 451346f01cab9de2ac36f521f5fe309131742208
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Oct 3 15:58:38 2026 +0100
+
+    sftp: fix failed uploads leaving disk space in use on the server - fixes #10033
+    
+    When an upload failed during the transfer, the partial file was
+    removed but its handle was never closed. The server kept the deleted
+    file open, so its space stayed allocated until the pooled connection
+    was closed, which in rcd, mount or serve could be until rclone exited.
+    
+    This closes the handle before removing the partial file.
+    
+    (cherry picked from commit d545615c1649fe7946acc344ae4c494694c05015)
+
+commit 6fadaa46aa5f2d92596c6c3b0e2b9f03ac79a2e7
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Oct 5 16:22:14 2026 +0100
+
+    filescom: document that names with / or \ in can't be stored and ignore their tests
+    
+    Files.com now treats the replacement characters rclone uses for / and
+    \ in file names (／ and ＼) as if they were the originals, and the
+    names ． and ．． as if they were . and .., and rejects them all with
+    "Invalid path". There is no other way of encoding these names, so
+    document the restriction and ignore the integration tests for them.
+    
+    (cherry picked from commit ed92e4446e9318d914d62566e7d2171349f8b2f4)
+
+commit 563919b0c05c6f8d0309b95444bc8ca1d56eeb01
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Oct 5 16:16:18 2026 +0100
+
+    webdav: fix "XML syntax error" on paths which don't exist with ownCloud 10.16
+    
+    ownCloud 10.16 answers a PROPFIND for a path which doesn't exist with
+    a 207 Multi-Status response, rather than a 404, with a body which
+    starts a multistatus document then appends a Sabre NotFound error to
+    it. This isn't valid XML so rclone failed with
+    
+        read metadata failed: XML syntax error on line 2: expected attribute name in element
+    
+    whenever it was pointed at a directory which didn't exist yet.
+    
+    Detect the NotFound error in the response and treat it as a 404.
+    
+    (cherry picked from commit f217c8a2aa8e3b2b41ffb54eaa80f8874d4062ca)
+
+commit 1ecdeb4466175a99d1c8963ac07da3b643958a9a
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Oct 5 16:03:29 2026 +0100
+
+    chunker: fix panic listing a directory after an interrupted upload with meta_format none
+    
+    With meta_format = none, listing a directory which contained the
+    temporary chunks of an interrupted upload, but no completed chunks for
+    that file, panicked with "invalid chunked object".
+    
+    The listing made a placeholder object for the file on seeing a
+    temporary chunk, which then had no chunks in it when it was validated.
+    Only make the placeholder on seeing a data chunk, so files which have
+    nothing but temporary chunks are ignored as they are when metadata is
+    in use.
+    
+    (cherry picked from commit 475997b6dec99dd07f7af804c975f5eea77309b2)
+
+commit b85a681721d5be891b43cff0980bcecade9d22be
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Sep 11 16:04:46 2026 +0100
+
+    azureblob: use the released Azure SDK for Apache Arrow listing
+    
+    The Blob Listing with Apache Arrow feature is now public and shipped
+    in azblob v1.8.1, so the temporary backend/azureblob/arrowlist package
+    which implemented it on top of the previous SDK has been removed and
+    the backend now uses the SDK's own listing pager with ResponseFormat
+    set to Arrow.
+    
+    As the SDK client handles every credential type this also makes Arrow
+    and parallel listing work with connection_string auth, and the
+    use_arrow_list and list_parallelism options are no longer hidden.
+    
+    (cherry picked from commit 3b9f0a05b55fc12e824eeaec4f71bb6a1498388c)
+
+commit 61b8a90db8f1edd5f0ba8c1162355bb07f1c76aa
+Author: GhostCoder6969 <ahmadbannout191999@gmail.com>
+Date:   Sun Oct 4 09:14:02 2026 +0200
+
+    docs: fix typo in speed test help text
+    
+    Co-authored-by: bounty-agent <bounty@example.com>
+    (cherry picked from commit 7ebef790b49add3d0610cea1a4b3d0ff270c383b)
+
+commit 419c5f984402142f53a88ff9ed0ee1858a37a396
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Oct 2 11:29:02 2026 +0100
+
+    archive: fix a squashfs path to a single file listing its whole directory
+    
+    Pointing the archive backend at a file inside a squashfs image, for
+    example `rclone cat :archive:image.sqfs/dir/file.txt`, listed every
+    file in the directory containing it instead of just that file. The zip
+    archiver already behaved correctly.
+    
+    The squashfs archiver now remembers the file the root points at and
+    only exposes that one, as zip does. Its Root() includes the file so
+    that the fs cache does not hand back the Fs for the whole directory in
+    its place.
+    
+    (cherry picked from commit 67afe55a833c63fdb284e29e3b11517f4cb3cdd9)
+
+commit 50d2430b4a8a92dea54e3dd2fd391cd5ea8d6aa0
+Author: Neil Cawse <8085959+neilcawse@users.noreply.github.com>
+Date:   Fri Sep 25 17:55:00 2026 -0400
+
+    vfs: stop setting a file's modtime from discarding its cached data
+    
+    Setting the modtime of a closed file refreshed the cache item's
+    fingerprint before the new modtime had been applied to the remote
+    object. The next open then saw a fingerprint mismatch, logged "removed
+    cache file as stale (remote is different)" and downloaded the whole
+    file again, even though only the modtime had changed.
+    
+    Refresh the cache fingerprint again once the remote modtime has been
+    set.
+    
+    (cherry picked from commit 9380daed0d54c50456c013f314332df78b4c8936)
+
+commit cd6941ed9359a1525c7b9797fc23a98d5b72bd19
+Author: Neil Cawse <8085959+neilcawse@users.noreply.github.com>
+Date:   Fri Sep 25 17:55:00 2026 -0400
+
+    vfs: fix reads returning zeros after a file changes during handle caching
+    
+    When a file was reopened within the --vfs-handle-caching grace period
+    (default 5s) after its remote fingerprint changed - for example after a
+    touch or any other modtime change - _checkObject removed the stale
+    cache file and open recreated an empty one, but nothing sized it. The
+    next GetSize stat'd the empty file and set the item size to 0, so
+    ReadAt's _ensure clamped the request to nothing and skipped the
+    download, then the size check zero-extended the file and returned the
+    zeros. Reads through a mount returned the correct length but zeros for
+    the first read (128 KiB through FUSE).
+    
+    This is easy to hit with git on a --vfs-cache-mode full mount: git
+    freshens pack files with utime, and a concurrent reader then sees
+    "not a GIT packfile".
+    
+    Size the recreated cache file from the object before opening it, as a
+    normal open does.
+    
+    (cherry picked from commit e0fb01084d5cd17acdcec24ed81ecc7294c31e80)
+
+commit 8290a478c88358dac41025156e2b63516ed620ca
+Author: TastyHeadphones <76083688+TastyHeadphones@users.noreply.github.com>
+Date:   Sun Sep 27 21:46:34 2026 +0900
+
+    oauthutil: fix Renew.Shutdown nil timer panic and race
+    
+    Shutdown was calling expiryTimer.Stop without holding ts.mu, so it could
+    panic if OnExpiry had not created the timer yet, and raced the write in
+    OnExpiry. Hold the lock and skip Stop when the timer is still nil.
+    
+    Fixes #9980
+    
+    (cherry picked from commit 80e462d48c188341ff4200a9d341b6e5a43db79c)
+
+commit d89f30a13688a4e2229958d718530861b45acecf
+Author: Rohit Behera <126186063+r0h1tb@users.noreply.github.com>
+Date:   Sun Sep 27 05:01:13 2026 +0530
+
+    docs: fix the expanded --bwlimit timetable example
+    
+    It was missing a space between two entries, so it didn't parse.
+    
+    (cherry picked from commit e497464b60641c26880ace2dded75d996ab8de5f)
+
+commit f8899ca98283cea4ab683f79c49b8817a4ca9cf9
+Author: Rohit Behera <126186063+r0h1tb@users.noreply.github.com>
+Date:   Sun Sep 27 05:01:13 2026 +0530
+
+    fs: fix --bwlimit timetables written out of order using the wrong limit
+    
+    Until the first time slot of the week, the timetable used its last entry
+    as the limit carried over from the week before. That is only the latest
+    slot of the week when the entries are in order, so a timetable written
+    weekend first, like "Sat-00:00,off Mon-00:00,1M", limited Sunday to 1M
+    instead of leaving it unlimited.
+    
+    Carry over the latest time slot of the week instead.
+    
+    (cherry picked from commit 124f3bd830ed38ffdc543e20489f014413972542)
+
+commit d77c1bf5c665ab9dac3e58706c15ae024072cac5
+Author: Dirk Petersen <dirkpetersen@users.noreply.github.com>
+Date:   Sat Sep 26 14:52:02 2026 -0700
+
+    s3: fix storage class missing from --s3-versions listings
+    
+    When listing with --s3-versions or --s3-version-at the storage class
+    of each object was dropped, so it read as STANDARD unless the object's
+    metadata was fetched separately. This meant backend restore skipped
+    objects in GLACIER or DEEP_ARCHIVE with "Not GLACIER or DEEP_ARCHIVE
+    or INTELLIGENT_TIERING storage class", and lsf --format T showed the
+    wrong tier.
+    
+    This happened because ObjectVersion.StorageClass has a different type
+    from Object.StorageClass so the generated setFrom helper does not copy
+    it. Convert it explicitly after the setFrom call.
+    
+    (cherry picked from commit e5eaf414f04890c10fe7a3915b716fa6a59a54a3)
+
+commit 19bf14aea46292d17df88e9d54be27c6f2e98623
+Author: hsdfat <118717478+hsdfat@users.noreply.github.com>
+Date:   Wed Sep 30 23:16:47 2026 +0700
+
+    docker: fix files uploaded with the wrong mime type - fixes #6384
+    
+    The Docker image had no /etc/mime.types, so MIME types came only from
+    Go's built-in table plus rclone's small extra list, and many
+    extensions uploaded as application/octet-stream.
+    
+    This installs Alpine's mailcap package to fix the problem.
+    
+    (cherry picked from commit 3cdf855547265472e82709aa51830d0345dc2299)
+
+commit 353167fd38c27eb20fda3dc07505991b1904d66d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 30 12:06:42 2026 +0100
+
+    selfupdate: fix --version X.Y depending on ./ in the download site links
+    
+    To find the latest patch release of a minor version, for example
+    `rclone selfupdate --version 1.75`, selfupdate searched the listing of
+    downloads.rclone.org for href="./vX.Y.Z/". The leading ./ is a detail
+    of how Caddy's file server writes its links. A listing which linked to
+    the same directories as "vX.Y.Z/", which is an equally valid relative
+    URL, made selfupdate fail with "could not find the minor release".
+    
+    This makes the ./ optional in the pattern, so selfupdate no longer
+    depends on which program wrote the listing, and takes the version from
+    a capture group rather than from fixed offsets into the match.
+    
+    The listings written by rclone index now include the ./ for the
+    benefit of rclone versions without this fix, so this is to remove the
+    dependency for the future.
+    
+    (cherry picked from commit 8cd43746a3db05b1c62c8702eb679280d2ba35b0)
+
+commit 09e1967c7313c46ce88e3e4b3ac9235efd54366d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 26 14:39:07 2026 +0100
+
+    serve s3: fix TestEtagHashAuto on Windows
+    
+    The temporary directory contains a drive letter colon so it needs
+    quoting in the crypt connection string, otherwise the password
+    parameter is dropped.
+    
+    (cherry picked from commit 9dc8b71ae99496460f07373674609571918bfb9c)
+
+commit 1d1eb94c342c11014f4df3cf340cec02a08f9b60
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 26 12:49:24 2026 +0100
+
+    build: fix lint errors from golangci-lint v2.14.0
+    
+    The newer revive flags an exported function returning an unexported
+    type and a redundant type in a var declaration.
+    
+    (cherry picked from commit 881cedd348bec5a01c6b6fb74263618edaf9fcac)
+
+commit fd3b9bd383d9edef930ffdd9f497550895318370
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 26 12:49:24 2026 +0100
+
+    build: fix TestS3Minio by switching to pgsty/minio as quay.io image is gone
+    
+    MinIO no longer publishes images on quay.io (nor Docker Hub or ghcr.io)
+    so pulling quay.io/minio/minio returns "unauthorized". pgsty/minio is a
+    maintained community fork with the same entrypoint layout.
+    
+    (cherry picked from commit 220c65f81d2edf8d2f0b4f0cdfdbe5df787e308c)
+
+commit 6676f2673ed3de3b00747e6233130251cf420e53
+Author: nielash <nielronash@gmail.com>
+Date:   Thu Sep 24 08:47:08 2026 -0400
+
+    fs: retry "network is unreachable" and "network is down" errors
+    
+    ENETUNREACH and ENETDOWN were not in the list of retriable errors on
+    non-Windows platforms, so a single failed connection aborted the
+    transfer instead of being retried as a low level retry. The Windows
+    list already includes the equivalent WSAENETUNREACH and WSAENETDOWN.
+    
+    This is easy to hit on a host with IPv6 enabled but no IPv6 route: if
+    the A lookup fails transiently while the AAAA lookup succeeds, the only
+    address to dial is IPv6 and the connect fails with ENETUNREACH. A retry
+    resolves again and normally succeeds.
+    
+    (cherry picked from commit 94e319d2fa87b4afa1e3ffda34e25a056fde45da)
+
+commit f6af51420f769df65c80e52d45229a71391f5f54
+Author: Roland <vv22345@163.com>
+Date:   Tue Sep 22 10:20:43 2026 +0800
+
+    fs: fix bandwidth limits below 1 KiB being multiplied by 1024 - fixes #9958
+    
+    BwPair.String printed a sub-KiB bandwidth as a bare number, and Set
+    reads a bare number as KiB, so a rate under 1 KiB grew by a factor of
+    1024 whenever it went through a string. rc core/bwlimit reports the
+    current rate in that format and accepts it back, so reading the limit
+    and setting it again raised it.
+    
+    63c4fef27 fixed the same corruption for config values by suffixing bare
+    numbers with B inside Option.String. Move that into a SizeSuffix method
+    and use it from BwPair.String as well.
+    
+    (cherry picked from commit 60bdc6d4548f780833f7e26b3d9780316d021edf)
+
+commit a7554556096a02eb4fdf7f2249e6668be14a1f4e
+Author: Harsh Raj Singhania <40535627+HarshRajSinghania@users.noreply.github.com>
+Date:   Wed Sep 23 20:15:37 2026 +0530
+
+    serve webdav: escape filename in zip download Content-Disposition header
+    
+    Use mime.FormatMediaType instead of unescaped string concatenation so a
+    directory name containing a double quote cannot inject extra disposition
+    parameters.
+    
+    Fixes #9962
+    
+    (cherry picked from commit 14a1359c96b57c3aa675b6bf56925edcb8f384f0)
+
+commit 0e6ed13131f7908d47e95c90dbbb243f8a59aa5d
+Author: Harsh Raj Singhania <40535627+HarshRajSinghania@users.noreply.github.com>
+Date:   Wed Sep 23 20:15:35 2026 +0530
+
+    serve http: escape filename in zip download Content-Disposition header
+    
+    Use mime.FormatMediaType instead of unescaped string concatenation so a
+    directory name containing a double quote cannot inject extra disposition
+    parameters.
+    
+    Fixes #9962
+    
+    (cherry picked from commit 661484f36c40a69f4cfe545c6e4642768bf99d26)
+
+commit 96d26338369213b24c93cad4b37b3a2d116877a7
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 17:45:15 2026 +0100
+
+    serve s3: fix CopyObject of a missing object not returning NoSuchKey
+    
+    Copying an object onto itself, as clients do to replace its metadata,
+    reported success when the object didn't exist, and copying a missing
+    object to a different key failed with an internal error. Both now fail
+    with NoSuchKey as S3 does.
+    
+    (cherry picked from commit ce5351c52e94ac0df65e4781f65f55291bae4f80)
+
+commit f625ac98a61cd740b379ac5cb57d621d2fb9b2c9
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:33:57 2026 +0100
+
+    serve s3: fix --etag-hash auto crashing or using the wrong hash with --auth-proxy
+    
+    With --etag-hash auto the hash for the ETags was chosen once from the
+    remote serve s3 was started with. With --auth-proxy there is no such
+    remote so serve s3 crashed on startup, and when started by the rc it
+    was the wrong remote, so users whose backends lacked that hash got no
+    ETags.
+    
+    The hash is now chosen from the backend of the user making each
+    request.
+    
+    (cherry picked from commit 746eac73efaaf60dfcd56f30ade924f64faaaeb1)
+
+commit 19068b6608108c2058763203de60c90c63dbd7e5
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 18:22:09 2026 +0100
+
+    serve s3: forget the metadata of deleted objects
+    
+    The metadata of every object uploaded was kept in memory for as long as
+    the server ran, even after the object was deleted, so it grew without
+    limit and the metadata of a deleted object reappeared on any object
+    later created at the same key other than through serve s3.
+    
+    Deleting an object now forgets its metadata.
+    
+    (cherry picked from commit c350f8ebbfbdb0cc8b82857977d12fbc2d96aada)
+
+commit ee40507d38a4cb82f3d7681f7d9e9e901b7d839d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 3 11:26:38 2026 +0100
+
+    serve s3: list objects lazily so paging a deep hierarchy is fast - fixes #9855
+    
+    Listing a prefix with no delimiter walked the entire subtree below it into
+    memory and only then sliced out the requested page, so every page of a
+    listing cost a full traversal of the tree.
+    
+    Walk the tree lazily instead, stopping as soon as the page is full and
+    skipping the subtrees an earlier page already returned. A page now costs a
+    number of directory reads proportional to the keys it returns rather than to
+    the size of the subtree, and ETags are computed only for the objects that
+    are actually returned.
+    
+    Entries are emitted in the order their keys have in a flat keyspace, with a
+    directory sorting as if it carried its trailing slash, so that "a.txt" comes
+    before "a/b" as it does in a real S3 bucket. Without this a resumed listing
+    would silently skip keys across a page boundary.
+    
+    (cherry picked from commit 04697cc02ade35bed7e31cbb39c78d3dcdeb61ee)
+
+commit b4cb0426a35b7c247828e234a5c720cc58ee9eee
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 17:44:53 2026 +0100
+
+    vfs: fix a VFS being reused while it is being shut down
+    
+    When the last user of a VFS shut it down at the same time as a new
+    user of the same remote asked for one, the new user could be given the
+    VFS being shut down, with its cache and background tasks stopped.
+    
+    Only a VFS which is still in use is now reused, otherwise a new one is
+    made.
+    
+    (cherry picked from commit c62aa2adc99f801514595cad8c1cf849caccdbcb)
+
+commit 5977137b3b7743b5f62016c473a3ff90b08fe6b2
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 16:27:42 2026 +0100
+
+    vfs: add Hold to keep a VFS from being shut down while in use
+    
+    A VFS is shut down when the last of the references to it from New is
+    given back with Shutdown. Hold takes another reference, for code using
+    a VFS it didn't create itself, which may otherwise be shut down under
+    it.
+    
+    (cherry picked from commit 1dab0f3abd3d4b5ad4399703ca50e844889f881c)
+
+commit 512f6193a2f4cf6570a8e59f9fb4406264bac1a2
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 15:51:33 2026 +0100
+
+    operations: fix TestMultithreadCopy leaving files behind when multipart upload is skipped
+    
+    When a backend rejected the multipart upload as too small, the subtest
+    skipped without removing its local source file, so the following
+    upload subtests failed their local listing checks.
+    
+    (cherry picked from commit ee9c228012a462b81e7d71482ebbac93f9a6fbbb)
+
+commit 46cf167c22055f9ebe05a8303bfd14dbf845b48a
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:31:22 2026 +0100
+
+    internxt: fix server-side directory move failing after a gateway timeout
+    
+    Moving a directory can take longer than the API gateway allows, so the
+    request fails with a 520 or 502 error even though the move completes.
+    The retry then failed with "Folder ... was already moved to that
+    location (status 409)".
+    
+    Treat that error as success.
+    
+    (cherry picked from commit 0c52b183d0185c120e2487513d953b3e73d16f6f)
+
+commit 2d24951658091a5b6e42a7b44d243db1a0a11441
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:29:45 2026 +0100
+
+    internxt: fix "directory not empty" and stale directories after moves and deletes
+    
+    The Internxt API serves listings from read replicas which lag behind
+    writes, so for a short while after files or directories are moved or
+    deleted they can still be listed in their old location.
+    
+    This caused removing a directory which had just been emptied to fail
+    with "directory not empty" (eg when moving a directory without server
+    side directory moves or purging a directory) and a directory which had
+    just been moved to be found in its old location.
+    
+    Remember the directories this process has moved or deleted and ignore
+    directory and file entries which contradict that when listing, finding
+    directories and checking a directory is empty before removing it.
+    
+    (cherry picked from commit 7ff5da8517154d5528a2d9be8d77f33b24dcdec0)
+
+commit ad9ad335f4a97b0608985b8247138a9e01215ef9
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:21:43 2026 +0100
+
+    internxt: fix server-side moves failing with "Not Found" or "already exists"
+    
+    Moving a file into a directory which had just been created failed with
+    "Not Found (status 404)", and moving a file over one which had just been
+    deleted (as sync does with --backup-dir and --suffix) failed with "A file
+    with the same name already exists in destination folder (status 409)".
+    
+    The API checks moves against read replicas which lag behind writes, so
+    retry these errors until the replicas catch up.
+    
+    (cherry picked from commit ee26daecd8a7143e2f5140548a01a67f8c733962)
+
+commit 7d3e148212a275684e2023fe062268b9827f451e
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:15:58 2026 +0100
+
+    internxt: fix sync with --backup-dir or --suffix deleting the backed up file
+    
+    The Internxt API serves lookups and listings from read replicas which
+    lag behind writes, so for a short while after a file is moved it can
+    still be returned from its old location.
+    
+    When sync moved a file into the backup location and then uploaded its
+    replacement, the upload could find the moved file under its old name
+    and overwrite it. Overwriting renames the existing file by UUID and
+    deletes it once the upload succeeds, so the file that had just been
+    moved into the backup location was deleted.
+    
+    Remember the files this process has moved or deleted for a minute and
+    ignore lookups and listing entries which contradict that.
+    
+    (cherry picked from commit f068abd607f8046e1f496742d8fd4c95a5d25833)
+
+commit 2ff47e82744699b3a8a9f9845ff126841c3814d0
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:14:15 2026 +0100
+
+    drime: fix deleted files and directories still being listed with hard_delete
+    
+    With hard_delete set, deleted files and directories carried on being
+    listed for about a second afterwards because the Drime server doesn't
+    invalidate its cache of the parent folder listing when entries are
+    deleted forever. This made removing a directory straight after
+    emptying it fail with "directory not empty".
+    
+    Moving an entry to the trash does invalidate the cache, so with
+    hard_delete set rclone now moves the entry to the trash first and then
+    deletes it forever.
+    
+    (cherry picked from commit a2e2b737253f449f439e9deb79221a1ad3d17488)
+
+commit f3bec5b1aa0c8499fa02e8d083638af43c0c563c
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:10:22 2026 +0100
+
+    drime: fix server-side copy over an existing file leaving a "name (1)" copy
+    
+    When server-side copying to a destination which already existed, the
+    Drime server gave the copy the name "name (1)" and rclone only renamed
+    it if the source and destination leaf names differed. The existing file
+    was then deleted leaving the copy under the wrong name.
+    
+    The server refuses to rename an entry to a name which is already in
+    use, so this removes the existing file straight after the copy, then
+    renames the copy whenever its name differs from the destination name.
+    
+    (cherry picked from commit eb10c48a176c5c88726763ab84b078b7502deced)
+
+commit d418a5a882ae331126b24955a2975c32732c2ab2
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:05:46 2026 +0100
+
+    premiumizeme: fix uploading files with ";" in their names
+    
+    The premiumize.me upload server has started truncating the multipart
+    file name at the first ";", so uploading "a;b.txt" created a file
+    called "a" and the upload then failed with "object not found".
+    
+    Directory creation and renames still accept ";", so files whose names
+    contain ";" are now uploaded under a temporary name and renamed into
+    place. The encoding is left unchanged so existing files and
+    directories containing ";" remain accessible.
+    
+    (cherry picked from commit 7c18e1eb869d6b4cfacd17b657e3a01d81f88c37)
+
+commit db96e30c5ea10a6fee97845298c769eb82f95d9b
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 11:54:26 2026 +0100
+
+    vfs: fix TestDirMetadataExtension on remotes which can't upload empty files
+    
+    (cherry picked from commit 034ac6275fc6a420c5b13d4cf01058f4a77bced3)
+
+commit 111fda1287a955c4d4f7d9df3ac29ef4a3b59dd8
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 12:35:04 2026 +0100
+
+    onedrive: document that shared with me shortcuts may fail to list on personal
+    
+    Shortcuts to shared items (and Personal Vault) are stored as remote
+    items pointing at another drive and listing them can fail with
+    "The provided drive id appears to be malformed". This aborts a
+    --fast-list listing of the whole drive.
+    
+    (cherry picked from commit 8c38d3068a40af45015566ec725647c4b4b51c58)
+
+commit 10d999e3ee885a0e6fe330a5fb13a3d0eea7b876
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 23 10:26:45 2026 +0100
+
+    rest: limit the size of HTTP response bodies read into memory
+    
+    rest.ReadBody read the whole response body into memory with no limit.
+    It is used by the default error handler and by many backends' error
+    handlers and small API calls, so a server which answered with an error
+    status and then streamed an endless body could make rclone allocate
+    memory until it was killed.
+    
+    ReadBody now reads at most 10 MiB (the same limit drainAndClose
+    already uses to discard unread bodies) and returns an error if the
+    body is bigger than that. Every caller reads small API responses -
+    error bodies, status documents and upload tokens - so no legitimate
+    response is affected.
+    
+    Reported by @manus-pi
+    
+    (cherry picked from commit 90e67915c88d4adf244f1d5251088c339c8b8e23)
+
+commit 6a7dcf12c3a47624a389d3fdf333fbb2da6a3a90
+Author: jxj <xinjun.jiang@daocloud.io>
+Date:   Wed Sep 23 00:44:58 2026 +0800
+
+    s3: fix version-at listings with URL encoded keys
+    
+    When S3 returns URL-encoded keys from ListObjectVersions, URL encoding
+    can change their lexical order. This could make mergeDeleteMarkers
+    place a delete marker after older versions of the same key, so
+    --s3-version-at reported deleted objects as live.
+    
+    Compare decoded keys while merging, while preserving the encoded keys
+    for the existing listing decode path.
+    
+    Fixes #9948
+    
+    (cherry picked from commit cfb90e3ebed479119718e3ae44b1171b060079e9)
+
+commit fecd1d578a1caf63dc874ec5818c14bdf559d676
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 22 15:10:29 2026 +0100
+
+    onedrive: update docs for versions, links and time precision on personal accounts
+    
+    Testing against OneDrive personal (free) and OneDrive for Business shows
+    
+    - personal accounts now create versions on setting the modification
+      time and can delete them, so --onedrive-no-versions and rclone
+      cleanup work there
+    - --onedrive-link-password works on OneDrive for Business
+    - personal free accounts can't set a link password or --expire
+    - --onedrive-link-type embed only works on OneDrive personal
+    - personal accounts store times with 1s precision, not mS
+    
+    See #9917
+    
+    (cherry picked from commit ff02636fe40fff8890e0ed1cd2f58341dff876aa)
+
+commit af92ea943d3a34848e5c5cc56612d807e5951e0a
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 17 15:18:29 2026 +0100
+
+    vfs: fix crash reading the metadata of a file which is being written
+    
+    With --vfs-metadata-extension set, looking up the metadata file of a
+    file which was open for write and not yet uploaded caused a nil pointer
+    panic. Such a file has no object to read the modification time from.
+    
+    Use the modification time of the VFS node instead, which is valid
+    whether or not the file has been uploaded.
+    
+    (cherry picked from commit 7a2d7c766d3dd9ae5006361b91bb17816fc36dd7)
+
+commit b46bb7647b9aab23eb024525eaca78187f0a52cd
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 22 14:58:12 2026 +0100
+
+    operations: fix TestDeleteFatalError, TestDirMoveMoveError and TestDirMoveContext on remotes
+    
+    TestDeleteFatalError set --max-delete before writing its files, so on
+    chunker, which deletes while uploading, the setup failed.
+    
+    TestDirMoveMoveError and TestDirMoveContext test the core DirMove logic
+    with a wrapping Fs. This fails on remotes without Move (eg s3, memory)
+    and on those whose objects don't belong to the wrapped Fs (eg archive),
+    so they now only run on local.
+    
+    (cherry picked from commit ff958c999fdca75490cd8a8e7965a41ee18733e0)
+
+commit 3f6b38c9d9263c945447002a3cc8bee34f8168ea
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 22 11:03:16 2026 +0100
+
+    iclouddrive: fix potential crash looking up items
+    
+    findItem read the response status code when the lookup failed, so a
+    failure with no HTTP response panicked.
+    
+    Thanks to @manus-pi for finding this problem.
+    
+    (cherry picked from commit 1e92520076ccc319fdae29e6fdc6a75bd523b5a2)
+
+commit a1fba2e8c105792988549ac25bac5bc824e1a0b5
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 22 11:03:16 2026 +0100
+
+    shade: fix potential crash in directory move
+    
+    DirMove discarded the error from the destination check and read the
+    response status code, so a failure with no HTTP response panicked.
+    Other errors were reported as the destination existing; they are now
+    returned.
+    
+    Thanks to @manus-pi for finding this problem.
+    
+    (cherry picked from commit 35abcadfc701509558483a7d55cbe1c7d4dbff84)
+
+commit dca3902fef30fa0836db8c65d01565aa2df88021
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 22 11:03:16 2026 +0100
+
+    imagekit: fix potential crash in rmdir and purge
+    
+    Rmdir and Purge read the response status code before checking for an
+    error, so a failed DeleteFolder call with no HTTP response (a network
+    error, or purging the root which fails validation) panicked.
+    
+    Thanks to @manus-pi for finding this problem.
+    
+    (cherry picked from commit e2cd9a5dfb3f28978adc58dc7f732a28a47c1f44)
+
+commit 06387f878a1d30e482b20722b75da8dec6f27317
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Sat Sep 19 21:01:35 2026 +0700
+
+    serve dlna: log unescaped paths - fixes #7370
+    
+    The request log printed the escaped URL, so non-ASCII file names showed
+    up as long runs of %XX escapes. Log the unescaped URL path instead, as
+    the other serve commands do.
+    
+    (cherry picked from commit 556940ea441790dd05d602f32d65dcc7ccd8d460)
+
+commit 13ae25b561f38a09f95a7d7777219142e2f25fe2
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Sat Sep 19 20:56:35 2026 +0700
+
+    vfs: fix AddVirtual ignoring isDir
+    
+    VFS.AddVirtual always added a file entry to the directory cache, even
+    when called with isDir set, so a virtual directory showed up as a file
+    and nothing could be added inside it.
+    
+    See #9310
+    
+    (cherry picked from commit ebb1cc122199d08dbc36e9b6e1fd38d5d4abe83f)
+
+commit 5ea1851d52df7bb67738663a4971563b13081b75
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Sat Sep 19 03:38:26 2026 +0700
+
+    smb: save the user name in the config even if it matches the current user - fixes #9356
+    
+    The default for --smb-user was the name of the user running rclone
+    config, and rclone does not write defaults to the config file, so
+    entering your own user name left it out. A remote made that way then
+    logged in as whoever ran it later, e.g. root under systemd.
+    
+    Make the default blank and look up the current user when the remote is
+    used, as the ftp backend does. Existing configs work as before.
+    
+    (cherry picked from commit 3c51b96774c2458e76a4a93de133587a6ee13396)
+
+commit 2b656919458690a7aed7fe5910544fb6abee3700
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Sat Sep 19 03:45:12 2026 +0700
+
+    operations: stop --copy-dest replacing files with --immutable
+    
+    When the source matched a file in --copy-dest, copyDest server-side
+    copied it over an existing destination which differed, so sync, copy
+    and copyto with --copy-dest could modify a file --immutable should have
+    protected.
+    
+    Leave such a destination for the caller, which rejects it with
+    ErrorImmutableModified as for any other modified file.
+    
+    (cherry picked from commit dc98c216f2c83653a83cc0ed20175bd42b174939)
+
+commit 5de8a01717374999d6fa9fbc0ecc33e7200adc4f
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 21 12:14:36 2026 +0100
+
+    rc: reject out of range integer parameters instead of truncating them
+    
+    This was spotted by CodeQL after this change was merged:
+    
+    976d05e1d rc: fix rc API accepting an out of range number and overflowing 64 bits
+    
+    (cherry picked from commit 7723091be979dac22c74e80a5e51135a931749e9)
+
+commit 4d50f6d878b120d99bacdd570a6c555a40f54ff7
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 21 12:04:10 2026 +0100
+
+    docs: remove broken SecureBuild links
+    
+    (cherry picked from commit 1dc2516f081515afe8a44b501ba2c18654651211)
+
+commit 34ad19a1eb2875d99464a986bcd6d82dac34ca63
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 23:22:02 2026 +0100
+
+    box, serve s3: fix log messages with bad format strings
+    
+    The box backend logged an int64 with %q which printed
+    %!q(int64=123) instead of the sequence ID.
+    
+    serve s3 passed the message from gofakes3 as the format string, so
+    any % in it was interpreted as a formatting directive and the message
+    was mangled.
+    
+    (cherry picked from commit 1c3e432c3fdbf98c5800c0390496d6944bac53b0)
+
+commit 5bc26e57b4846a087512c6a83bf95fbee2112fe1
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Sep 18 11:04:03 2026 +0100
+
+    rc: make job/status and job/list require authentication
+    
+    job/status returns the complete output of the job so it is as
+    sensitive as the call which started the job, e.g. config/dump started
+    with _async returns the config file including any secrets. It was
+    possible to read this without authentication where an authenticated
+    and an unauthenticated rc server share the same process, e.g. rclone
+    gui --rc.
+    
+    An unauthenticated client can't start jobs on a server which needs
+    authentication, other than with the calls which don't need it, so
+    this shouldn't affect existing users.
+    
+    (cherry picked from commit 939f82d908c1872d77607e190b79085cdbb557e3)
+
+commit 8d15b2bb7528069590c307a25be202aeae2417a6
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 17 12:36:54 2026 +0100
+
+    log: fix race when adding a log output while logging
+    
+    Handle read the list of extra outputs without holding the mutex, so
+    calling AddOutput while logging caused a data race.
+    
+    This reads the extra outputs once under the mutex.
+    
+    (cherry picked from commit 4cd6359ae9883aa1ae37823dd18948094e9b3752)
+
+commit c062ec1b128381a109f3220f6c040fa372420bdd
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Thu Sep 17 15:04:21 2026 +0100
+
+    jobs: fix tests failing and racing when run with -count > 1
+    
+    TestRcJobList listed the jobs left running in the global job list by
+    the previous run of the tests, so reset the global job list first.
+    
+    (cherry picked from commit dd07bb33ba6ecb6171d9aa55aead16857e8cb117)
+
+commit 7b647c729bb03c3424f17add8320b448b4d9340c
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 23:46:02 2026 +0100
+
+    operations: don't sleep for a Retry-After error when the transfer is cancelled
+    
+    The wait to obey a Retry-After error from the server used
+    time.Sleep() so it carried on sleeping when the context was
+    cancelled, e.g. by job/stop or --max-duration, and it also slept
+    after the last try when there was nothing left to retry.
+    
+    Copying a file also logged the low level retry number counting from
+    0 rather than 1 as everything else does.
+    
+    (cherry picked from commit 88bd49fab8e7b0287a4dab2ce783958f7815560c)
+
+commit 43474041198a736617090a1f0e23ef775deff74b
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 23:45:51 2026 +0100
+
+    operations: fix hang and lost context when moving a directory file by file
+    
+    When the backend has no DirMove method, operations.DirMove moves the
+    objects one by one. If one of the moves failed the movers stopped
+    without receiving the rest of the objects, so DirMove blocked forever
+    once the channel filled up. This could be seen renaming a directory on
+    a mount of a backend without DirMove, such as s3.
+    
+    The moves were also done with context.Background() instead of the
+    caller's context, so they didn't have the caller's config, couldn't
+    be cancelled and weren't counted in the caller's stats.
+    
+    (cherry picked from commit b82a024de00d088d3dfb56dd9abd579df31c4f94)
+
+commit 366b188a5a602a379c381530797a31ba0871ab80
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 19 23:45:34 2026 +0100
+
+    operations: fix hang when deleting files and a fatal error occurs
+    
+    When a fatal error such as --max-delete being reached stopped the
+    deletions, the deleters returned without receiving the rest of the
+    objects, so whatever was sending them blocked forever once the
+    channel filled up.
+    
+    For example "rclone delete --max-delete 1" on a directory with more
+    files than --checkers hung instead of returning the error.
+    
+    The deleters now keep receiving objects without deleting them after a
+    fatal error.
+    
+    (cherry picked from commit caa341878f6ddf4cb3235721ce5a770d7f05bbeb)
+
+commit 0dd95c28409ef94a5b228e2b68e3b10ed66ab82d
+Author: Jeremy Schoemaker <jeremy@shoemoney.com>
+Date:   Sat Sep 19 14:43:05 2026 -0500
+
+    rc: fix large numeric parameters being rejected on 32 bit builds
+    
+    Params.GetInt64 parsed string parameters with strconv.ParseInt(x, 10, 0).
+    A bitSize of 0 means int, which is 32 bits on 386, arm, mips and mipsle,
+    so any value outside the int32 range was rejected as out of range even
+    though it fits in the int64 the method returns.
+    
+    Parameters reach the rc API as strings on the paths that matter here: the
+    rc server puts every URL query and form value into Params as a string, and
+    rclone rc turns each key=value argument into a string. So on a 32 bit build
+    operations/getfile could not be given an offset, count, head or tail beyond
+    2 GiB, and debug/set-soft-memory-limit could not be given a limit beyond
+    2 GiB, while the same commands worked on a 64 bit build.
+    
+    Parse with a bitSize of 64 to match the declared return type. This is the
+    string half of the range checking that was added to the float64 branch of
+    the same function in 976d05e1.
+    
+    (cherry picked from commit b5f83bdbf29af4437c45b44f6c456aa4aae8d3a5)
+
+commit efba10c06501a1eb459a39557092c61b60ebeb2d
+Author: Wang Chencheng <nyte_plus@sjtu.edu.cn>
+Date:   Sat Sep 19 17:24:10 2026 +0800
+
+    operations: fix ignored error in rcat probe reads
+    
+    Return the first non-EOF input error encountered while Rcat probes whether an
+    upload is small. Previously that error was ignored and the full probe buffer,
+    including bytes that were never read, could be passed to Put or PutStream.
+    
+    (cherry picked from commit b93b73bcb08fc981fac11b24218aaf205eb0c656)
+
+commit cc53a4cdac54e7b707c052c70935fa2973932afd
+Author: Vasek Sraier <git@vakabus.cz>
+Date:   Sun Sep 13 23:05:07 2026 +0200
+
+    serve restic: prevent concurrent append-only overwrites
+    
+    - Reject uploads when object lookup fails for reasons other than "not found".
+    - Serialize uploads to the same object to prevent races between the
+      existence check and the write.
+    
+    (cherry picked from commit d632f8bb5188302ade9801e6b7d97e57974f052a)
+
+commit 89c6cb0911eaba6db945744333d88349d3b7fdcb
+Author: Acts1631 <69813585+acts-1631@users.noreply.github.com>
+Date:   Wed Sep 16 12:09:39 2026 -0400
+
+    compress: fix crash on ranged reads when gzip metadata is corrupted
+    
+    Gzip metadata is read from the wrapped remote and could contain an
+    invalid block size or incomplete block index. A range read could then
+    panic in the seekable gzip reader.
+    
+    Validate the gzip sidecar invariants before constructing a reader so
+    malformed remote metadata returns an error instead of crashing rclone.
+    
+    (cherry picked from commit c8d60a67fc5326d5b2fb811cc9036d0103fd5e37)
+
+commit a5f965380753aa9274e94e1f0543dc7b57076316
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 15 16:17:15 2026 +0100
+
+    fstest: remove the TestS3MinioEdge test server
+    
+    The minio/minio:edge image it ran has gone from Docker Hub and there
+    is no equivalent tag on quay.io, so this test remote can no longer be
+    started.
+    
+    (cherry picked from commit a401763cf6c6cea3bab55c4b53aa0515ad158cb5)
+
+commit 620ce60d00dc3e2642b16dd0699cd3651bd49dff
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 15 16:15:30 2026 +0100
+
+    fstest: make test server start fail fast when docker run fails
+    
+    The start function was run inside an if condition, where bash ignores
+    errexit, so a failed docker run was not noticed. The script then
+    printed its connection details anyway and the test spent 100 seconds
+    trying to connect before failing with a message that hid the real
+    error.
+    
+    Run start in a subshell with errexit on and check its status
+    explicitly so the failure is reported immediately with docker's
+    error message.
+    
+    (cherry picked from commit 4cf1da0d4f90b1a49c1682dab8b5a8e9e34e92ed)
+
+commit fa75e2b1784ff9c398f7445e144a601ea6d37f89
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 15 16:15:30 2026 +0100
+
+    build: fix TestS3Minio by pulling minio from quay.io as it has gone from Docker Hub
+    
+    The minio/minio repository has been removed from Docker Hub so the
+    TestS3Minio test server could not be started and every Linux CI run
+    failed. quay.io/minio/minio still serves the final release so use
+    that instead.
+    
+    (cherry picked from commit e0d846f29e951b153cd663e7811ab607d0f68dee)
+
+commit b5055efecf4d959f12916acd59ef0febc648e1d9
+Author: KBS <xncb135@korea.ac.kr>
+Date:   Wed Sep 16 00:45:33 2026 +0900
+
+    rc: fix rc API accepting an out of range number and overflowing 64 bits
+    
+    float64(math.MaxInt64) rounds up to 2^63, so x > math.MaxInt64 in
+    GetInt64 lets 2^63 through to int64(x), which is out of range.
+    
+    (cherry picked from commit 976d05e1ddf58ba8b247507853f6e71f7f28c06d)
+
+commit ab8a00e1596b3f5849198aa100f6ed179fede901
+Author: foecmke <221832573+foecmke@users.noreply.github.com>
+Date:   Tue Sep 15 23:42:32 2026 +0800
+
+    docs: update --onedrive-hard-delete to mention personal account support
+    
+    (cherry picked from commit b1a10fe17e5901a81bce4d9b631f7732474f4ab8)
+
+commit 70700de356a4eee94ac6c0da6fac59cd3dd9206e
+Author: Kunpeng Xie <68572236+pentaoa@users.noreply.github.com>
+Date:   Tue Sep 15 23:40:40 2026 +0800
+
+    accounting: stop averaging when the last check finishes
+    
+    Release the averaging goroutine when checks outlast transfers, with a regression
+    test for the completion order.
+    
+    Assisted-by: OpenAI Codex
+    (cherry picked from commit 4f0148db0c3762e299b45d8c28d57c64ea268da2)
+
+commit 277d3ea14620d6a8beeef7d8c9df0fa3bdbde54e
+Author: tomaszni <tomaszni@users.noreply.github.com>
+Date:   Tue Sep 15 17:38:20 2026 +0200
+
+    oracleobjectstorage: upload empty streams without multipart
+    
+    OCI rejects a multipart completion request with no parts. Probe unknown-size
+    streams through a buffered reader and use a regular upload when the stream is
+    empty. Peek preserves a non-empty stream for the selected upload path.
+    
+    (cherry picked from commit e85836d4c79236d15570b889ea059ec991a0360b)
+
+commit fc65a1b9cba24d4ca2deb287d88f279ef41b8426
+Author: Eugene <inbox@null.page>
+Date:   Sat Sep 12 10:44:08 2026 +0200
+
+    cmount: ignore com.apple.* xattrs on the macOS FSKit backend
+    
+    (cherry picked from commit 0cb6ddada9c389484f8c5cfc40825a651a31789d)
+
+commit b1677718cdd2bd257374fe39e8da4c95c88b2d5a
+Author: jzunigax2 <125698953+jzunigax2@users.noreply.github.com>
+Date:   Fri Sep 4 20:29:57 2026 -0600
+
+    internxt: fix lookups of files starting with a dot and dropped uploads
+    
+    Internxt stores a file as a (plainName, type) pair and never derives the
+    split itself, so it is a convention shared between clients. This backend
+    split at the final dot, storing and looking up ".bashrc" as an empty name
+    of type "bashrc", where the web, desktop, Linux and macOS clients all keep
+    the leading dot in plainName. List rebuilt the full name so such files
+    appeared, but NewObject looked them up by the split and missed them.
+    
+    (cherry picked from commit 77ec281072b5ebfb636cc9f5e5f8bc1747ee0334)
+
+commit 4dde74364b9997987fbd1fa7698ea680610b1b5d
+Author: jzunigax2 <125698953+jzunigax2@users.noreply.github.com>
+Date:   Wed May 13 22:02:46 2026 -0600
+
+    refactor: streamline file existence checks and metadata retrieval
+    
+    - Replaced the preUploadCheck function with findFile for better clarity and efficiency in checking file existence.
+    - Introduced splitNameExt to encapsulate name and extension parsing logic.
+    - Updated NewObject and Update methods to utilize findFile for improved file metadata handling.
+    - Enhanced error handling and reduced redundant code in file checks.
+    
+    (cherry picked from commit e441773d24b6a19bf90e02d646465088a0a2ce11)
+
+commit bb7b312b19547182f91af916234c79d6c27a7d9f
+Author: n4n5 <its.just.n4n5@gmail.com>
+Date:   Mon Sep 14 14:45:31 2026 +0200
+
+    docs: extend librclone instructions for gomobile
+    
+    (cherry picked from commit 8fafc08dd116c31047fa7d0b1f9af1130133c02e)
+
+commit 43162d20e0f991df4ed61d55f5fabcace359dc14
+Author: Vladimir Babin <vovababin@gmail.com>
+Date:   Sat Sep 12 18:22:38 2026 +0300
+
+    archive: fix crash when creating archive to stdout - fixes #9910
+    
+    When rclone archive create is run without a destination the archive
+    should be written to stdout, but ArchiveCreate called
+    CheckValidDestination on the nil dst and panicked with a nil pointer
+    dereference. Skip the destination check when there is no destination.
+    
+    Also remove a leftover debug Printf that wrote to stdout before the
+    archive data.
+    
+    Signed-off-by: Vladimir Babin <vovababin@gmail.com>
+    (cherry picked from commit 3342e34f583d470136608e763e87f5fb9fc4ad60)
+
+commit ba3a6c17ce118d083709df2a5208ce78c9ec9c73
+Author: maximilize <3752128+maximilize@users.noreply.github.com>
+Date:   Mon Sep 14 07:27:06 2026 +0200
+
+    docs: clarify --password-command quoting for a path with spaces
+    
+    (cherry picked from commit 0e19ed565fab73afcc463457d04339df63923518)
+
+commit 7c1a79e071235448595560d1cc9c3797a5c068de
+Author: enkvadrat <123565769+enkvadrat@users.noreply.github.com>
+Date:   Mon Sep 14 07:25:31 2026 +0200
+
+    docs: add padding to footer card
+    
+    This is mostly visible in dark mode, as a side effect off adding the class,
+    the background of the card also changed to be dark-gray.
+    
+    (cherry picked from commit c2a5884ad920e353e0443fb0c4d2a07fbe2cee5f)
+
+commit 0d582bfffed5cf4a88a88bc39f96b58e1a79123c
+Author: ZRHann <2829442630@qq.com>
+Date:   Thu Sep 10 15:22:28 2026 +0800
+
+    webdav: fix duplicated listing entries after retried PROPFIND
+    
+    (cherry picked from commit 812e693fd787d324981d423e9a73c873716c1046)
+
+commit 459501873b223dfb0209cf2f89fa69f8f54c66b0
+Author: shaurya <shauryajaiswal.dev@gmail.com>
+Date:   Fri Sep 11 09:46:21 2026 +0530
+
+    docs: fix broken --check-filename self-link in bisync docs
+    
+    The link pointed at a bare relative path (--check-filename) instead of
+    the in-page anchor for the ### --check-filename heading further down the
+    page, so it 404s on the rendered docs site. Point it at #check-filename
+    (Hugo strips leading dashes when generating header anchors).
+    
+    ---------
+    
+    Co-authored-by: no-hup <19599684+no-hup@users.noreply.github.com>
+    (cherry picked from commit c3ba184611c3356acef327c5a42d530564f68466)
+
+commit f1590144a498ac597f0f231ab407e8a11d3887af
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Tue Sep 8 15:27:07 2026 +0100
+
+    docs: update sponsors
+    
+    (cherry picked from commit 7b3a4e5144508f89c76044b98f8083784286c7f3)
+
+commit 9d25ce63a3f33a01a6a5c8cf475738ca284349cb
+Author: subomi <86053854+ubmids@users.noreply.github.com>
+Date:   Thu Sep 10 15:46:08 2026 +0100
+
+    docs: lshelp: explain that a directory on a bucket-based remote is a key prefix
+    
+    Listing a bucket without -R shows each prefix as one directory entry, so the
+    objects under it are not in the output. This is easy to read as a truncated
+    listing rather than as one level of a hierarchy.
+    
+    Fixes #9797
+    
+    (cherry picked from commit 8c32435bec863fa593fd16d6ac039d98d0c53c30)
+
+commit 18c39dc28398e9a431d27495d8f51474d49b5b7f
+Author: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>
+Date:   Wed Sep 9 10:38:19 2026 +0100
+
+    build: update google.golang.org/grpc to 1.85.0-dev.0.20260825072537-93e31b48545e to fix CVE-2026-84445
+    
+    A vulnerability exists in gRPC-Go servers configured with
+    xds.NewGRPCServer() where a crafted request missing both :authority
+    and Host headers can cause a server panic, resulting in a Denial of
+    Service (DoS).
+    
+    This update fixes the problem.
+    
+    (cherry picked from commit ef6968730fc5582aa2a1db028440f3acc48b4e27)
+
+commit 79ccf3d26b1cc75093cddd6ba18c00167c4291ab
+Author: youdie006 <xncb135@korea.ac.kr>
+Date:   Tue Sep 8 18:36:55 2026 +0900
+
+    fs: fix about showing a negative total when a quota reaches the int64 maximum
+    
+    NewUsageValue exists to clip an oversized quota to the maximum value of an
+    int64, which is what dc95f36bc added it for when Box raised the Enterprise
+    space_amount to 1e+18 and started returning it as a float.
+    
+    For the float64 instantiation the guard misses its own boundary.
+    float64(math.MaxInt64) is not 2**63-1, it rounds up to 2**63, so a quota of
+    exactly 2**63 fails the comparison and falls through to the int64 conversion,
+    which the spec leaves implementation dependent for an unrepresentable value.
+    On linux/amd64 it wraps:
+    
+        Before: rclone about -> Total=-9223372036854775808
+        After:  rclone about -> Total=9223372036854775807
+    
+    A negative total is not just a wrong number. vfs.Statfs documents -1 as "not
+    known", vfs.fillInMissingSizes branches on total < 0, and serve sftp only
+    computes its usage percentage when total > 0, so the value is read back as a
+    missing quota.
+    
+    The int64 and uint64 instantiations are unaffected, since for them
+    T(int64(math.MaxInt64)) is exact and clipping MaxInt64 to MaxInt64 is a no-op.
+    
+    (cherry picked from commit 52ac7e0e185f20b9fa9504691c3bdef317fcf02e)
+
+commit d659d10afdb08a603504b18f75904f469e874a59
+Author: youdie006 <xncb135@korea.ac.kr>
+Date:   Tue Sep 8 17:03:48 2026 +0900
+
+    fs: make BwTimetable.Set replace the timetable instead of appending to it
+    
+    Set built the timetable with *x = append(*x, ts), so setting a bandwidth
+    timetable on a value that already held one kept both schedules. The single-value
+    branch of the same function has always done *x = BwTimetable{ts}, and the other
+    multi-token Set methods in this package build into a local and assign at the end.
+    
+    The visible effect is through the rc API. The "main" options block registered in
+    fs.RegisterGlobalOptions is the live globalConfig, and options/set reshapes JSON
+    straight into it, so
+    
+      rclone rc options/set --json '{"main": {"BwLimit": "Mon-10:00,1Mi"}}'
+    
+    added to the running daemon's timetable rather than replacing it, and the older
+    slot kept winning: LimitAt for a Sunday returned the previous 10Mi. The same
+    applies to a _config override on a single call, since AddConfig shallow-copies
+    the global.
+    
+    Building into a local also stops a failed parse from leaving the previous
+    timetable partly overwritten, which the existing error cases already expect.
+    
+    (cherry picked from commit 5bbc5d5545c53afe7c65380e89faf44825cad875)
+
+commit b8431d4f5082c49d7d8bff67b0d82274f7856a87
+Author: Aditya <f20220497@goa.bits-pilani.ac.in>
+Date:   Tue Sep 8 21:21:05 2026 +0530
+
+    s3: disable signing Accept-Encoding for Ceph and Linode - fixes #8206
+    
+    Ceph RGW (and Linode Object Storage, which is Ceph-backed) can break
+    SigV4 when Accept-Encoding is included in the signature, especially
+    when a reverse proxy rewrites that header. GCS already sets this quirk;
+    apply the same default for Ceph and Linode as suggested in #8206.
+    
+    (cherry picked from commit ea589de9415703d63a956d7059848cc377fcdeb6)
+
+commit 6c566ca0141da99c69a534c6cc97226ee957d1eb
+Author: tomaszni <tomaszni@users.noreply.github.com>
+Date:   Tue Sep 8 18:18:00 2026 +0200
+
+    oracleobjectstorage: fix SSE-C server-side copies
+    
+    Set the OCI source SSE-C request headers when using a customer key.
+    Server-side copies need these headers to decrypt the source object, in
+    addition to the existing headers that encrypt the destination.
+    
+    (cherry picked from commit 3eee2c0dd2ef656eb21d2b1b559779357cdbc4a4)
+
+commit cd7cef72db268b88cd311b67cee3b40da2351a6f
+Author: Murat Topcu <murat-topcu@outlook.com>
+Date:   Sun Sep 6 12:30:47 2026 +0300
+
+    selfupdate: fix TestInstallOnLinux panicking when the build is the latest beta
+    
+    The test asks InstallUpdate to install the latest beta into an
+    unwritable file and expects an error. When the binary under test
+    reports exactly the latest beta version (as make quicktest does right
+    after a beta is published from the same commit), InstallUpdate
+    correctly decides there is nothing to do and returns nil, and the test
+    then dereferences the nil error and panics.
+    
+    Pin fs.Version to a fixed old value for the duration of the test so an
+    update is always attempted, and use require.Error so a missing error
+    fails the test instead of crashing it.
+    
+    (cherry picked from commit 89fc14059e256895442ff88ac64c916995bcd7a0)
+
+commit 33ee8c0ef89bf82a5edbe27c2eda6edd0191efbc
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Sat Sep 5 22:10:29 2026 +0700
+
+    serve docker: fix volume path being lost when the plugin restarts
+    
+    applyOptions consumes the "path" option into vol.Path rather than leaving
+    it in vol.Options, but restoreState rebuilt the options with only fs and
+    type. The explicit path was therefore dropped when the plugin restarted,
+    and since fsString is rebuilt from those options the volume was remounted
+    at the root of the remote instead of at its subpath.
+    
+    Before this change a volume created with type + path lost its path
+    completely, and one created with remote + path silently fell back to the
+    path of the connection string. With a backend whose credentials are
+    scoped to the subpath the restored mount then failed every operation
+    rather than serving the wrong directory.
+    
+    Feed the persisted path back like fs and type, so applyOptions applies
+    the same precedence on restore that it applies when the volume is
+    first created.
+    
+    Fixes #9853
+    
+    (cherry picked from commit 9ac29e3b352a2b7f8e76edd5c6e2d1b7cb3e4a34)
+
+commit bb0633ee437d1746c2e0d4a890124cd29e749b8c
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Tue Aug 11 23:21:50 2026 +0700
+
+    dropbox: match shared-folder and received-file names case-insensitively - fixes #9706
+    
+    The Dropbox backend advertises CaseInsensitive: true, but the two
+    shared-mode lookup helpers compared names with an exact, case-sensitive
+    ==, so a shared folder or received file named "Project" could not be
+    found when requested as "project". Use strings.EqualFold in both
+    findSharedFolder and findSharedFile to honour the advertised
+    case-insensitivity.
+    
+    Fixes #9706
+    
+    (cherry picked from commit b549554c31b53f7e3a7d705e9d26dcbf4b00b1af)
+
+commit 347738843fafe11607e2572b9e4fd159a79c34fd
+Author: phatlc <phatle.hsd@gmail.com>
+Date:   Tue Aug 11 23:17:37 2026 +0700
+
+    dropbox: fix shared folder mount for roots nested more than one level deep
+    
+    In shared_folders mode NewFs derived the shared folder name with
+    path.Dir(f.root), which returns the parent path rather than the first
+    path component. For a root like "SharedFolder/subdir/deeper" this yielded
+    "SharedFolder/subdir", which findSharedFolder cannot match, so NewFs
+    failed with ErrorDirNotFound. Use the first path component of the root,
+    as the shared_folders option documents, so deeply nested roots mount.
+    
+    Fixes #9705
+    
+    (cherry picked from commit ac7cfcc848727ccb0d6c1314b3c1320522e4e652)
+
+commit 4d547c4b7b940f83e5572ea8b77b6652804521fc
+Author: ferrumclaudepilgrim <ferrumclaudepilgrim@users.noreply.github.com>
+Date:   Tue Aug 11 22:15:33 2026 -0500
+
+    vfs/vfscache: fix hang when the cache cleaner is disabled
+    
+    KickCleaner sets the out of space flag, kicks the cleaner and then waits for
+    that flag to clear. Only the cleaner clears it, and the cleaner returns
+    immediately when the cache poll interval is not positive, so when it is
+    disabled nothing ever reads the kick or clears the flag and the caller waits
+    forever.
+    
+    It now returns straight away in that case, under the same condition the
+    cleaner itself uses to decide it is disabled. Callers already retry a bounded
+    number of times and then report the error, which is the right outcome when
+    nothing is going to free space.
+    
+    (cherry picked from commit e724790620d390447f5553bdad16eda4e8584db9)
+
+commit ab95b42328b845875d117c9e30c095a76c77fa1a
+Author: ferrumclaudepilgrim <ferrumclaudepilgrim@users.noreply.github.com>
+Date:   Mon Aug 10 16:41:45 2026 -0500
+
+    fserrors: fix out of space detection on Windows - fixes #8011
+    
+    IsErrNoSpace compared against syscall.ENOSPC. Go defines that constant on
+    Windows as a value in its application reserved range which no Windows API
+    returns, so the comparison could never be true there. A full disk on Windows
+    reports ERROR_DISK_FULL or ERROR_HANDLE_DISK_FULL instead.
+    
+    Preallocation failures were still caught, because those return a separate
+    sentinel, but a disk that is already full fails at the directory creation or
+    at the open long before preallocation is reached. That is the case reported.
+    
+    The errors are now held in a list which platform specific files add to in
+    their init, which is the shape retriable_errors already uses in this package,
+    and the comparison itself is unchanged. Windows appends the two codes that
+    lib/file already recognises when preallocation fails. Every other platform
+    keeps exactly the behaviour it had.
+    
+    This also reaches the VFS cache, which uses the same helper and has no
+    preallocation path of its own, so its out of space handling has been inert
+    on Windows.
+    
+    (cherry picked from commit ca41db095bf1710b183daa1cc7e9ad97488d95f4)
+
+commit 409ba3b1f4d32a98bac7e4ef9bdf664e004731c6
+Author: Sanjay Kanth A <sanjaykanthsk09@gmail.com>
+Date:   Thu Sep 3 12:29:33 2026 +0530
+
+    docs: drive: document Branding step needed to publish own client_id
+    
+    Google now requires an app homepage URL and privacy policy URL to be
+    set on the OAuth consent screen's "Branding" page before the "PUBLISH
+    APP" button becomes clickable, even for a personal single-user app.
+    The existing instructions jumped straight to publishing in step 9
+    without mentioning this, leaving the button greyed out with no
+    explanation of why.
+    
+    Fixes #9854
+    
+    (cherry picked from commit c875d8903390d8349d0044c9d6bd006974d146e9)
+
+commit 274342326c80460438488cfe174d522537580c7b
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 7 17:57:23 2026 +0100
+
+    dedupe: fix rename mode giving up after 100 names and make it faster - fixes #9860
+    
+    Before this change `rclone dedupe --dedupe-mode rename` probed the
+    backend for each candidate `name-N.ext` in turn and gave up when it
+    had tried 100 names for a given object. With daily runs against the
+    same duplicated filename this ceiling was eventually reached and
+    rclone logged "Could not find an available new name". Each probe was
+    also a backend lookup, so a run against 99 existing names took
+    minutes on Google Drive.
+    
+    The rename now uses the listing dedupe has already made to skip names
+    known to be taken without asking the backend, and only confirms the
+    final candidate with NewObject (the listing may be incomplete because
+    of filters). The suffix counter is shared between the objects being
+    renamed so no name is checked twice. The safety limit is raised to
+    10000 which, thanks to the listing, no longer costs a lookup per name.
+    
+    (cherry picked from commit bc4a208e7e125f741a70bce6a7843aae9eefb1a0)
+
+commit 97eee1fecf179c17b17d698948c81247f15fec41
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 7 17:01:41 2026 +0100
+
+    serve ftp: fix VFS leak when the server fails to start
+    
+    The deferred cleanup in the constructor checked a local error variable
+    rather than the error being returned, so failures after the VFS was
+    created (such as an invalid --passive-port) never shut it down. Name
+    the error return so the cleanup sees the returned error.
+    
+    (cherry picked from commit 9b9fd3f4936e91fcc534645e9756972e10e160cf)
+
+commit 98274d294a271d7f118c8c339473c35431a9e4ca
+Author: Hakan İSMAİL <hakanismail53@gmail.com>
+Date:   Fri Aug 14 22:26:32 2026 +0300
+
+    serve, mountlib: test VFS release on shutdown and mount failure
+    
+    (cherry picked from commit 30e79a017bdc48c7a1be3f5fce308e629019b67b - without the cmd/mountlib test as the mountlib fix isn't in this branch)
+
+commit 34aeb94efa1b05855d8fe9dffed126f120458ce7
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Mon Sep 7 16:55:51 2026 +0100
+
+    serve webdav,http: fix crash when the server fails to start - fixes #9882
+    
+    When the HTTP server failed to initialise, for example because the
+    listen address was already in use, rclone panicked with a nil pointer
+    dereference instead of reporting the error.
+    
+    The deferred cleanup in the constructor read the provider from the
+    named return value, but `return nil, err` sets that to nil before the
+    deferred function runs. Use a local variable for the server instead.
+    
+    (cherry picked from commit f2a390b2d4510afd87fd5b0053f5404b27e84e16)
+
+commit de09fecf1c71284f4e05fb11a26214b55bc31af2
+Author: Dhevenddra K G <121691114+Dhevenddra@users.noreply.github.com>
+Date:   Sat Sep 5 22:23:08 2026 +0530
+
+    docs: fix duplicated words in vfs and backend documentation
+    
+    (cherry picked from commit 3d7b101c7f4bc3ebdcfc882c063fffd1c16bf196)
+
+commit b7b89b07086009596e45748b04eaf8de792fba15
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Sep 4 11:14:56 2026 +0100
+
+    serve docker: fix tests leaving unkillable processes and stale FUSE mounts
+    
+    Writing to the mount with os.WriteFile made the Go runtime register
+    the file with its poller so the kernel then polled the file from
+    epoll_ctl and epoll_wait, sending POLL requests to the FUSE server
+    running in this same process. A thread waiting inside epoll cannot be
+    preempted by the runtime, so a garbage collection starting while such
+    a POLL was outstanding stopped the world for good - the test binary
+    could not be killed even with SIGKILL and the mount was left behind,
+    wedging anything that touched it.
+    
+    Now we write through the mount with a descriptor straight from
+    open(2), which os.NewFile keeps out of the poller, check that it
+    really is out of the poller with SetDeadline, and check at the end of
+    the test that the mountpoint is unmounted.
+    
+    In this commit we fixed the same problem for mount by running in a
+    subprocess however changing one write file routine here was much
+    easier than re-arranging the tests.
+    
+    4a382c09ecab5cee mount: run tests in a subprocess to fix deadlock - #3259
+    
+    Note that go-fuse (and hence mount2) works around this problem it by
+    forcing an early POLL it can answer with ENOSYS.
+    
+    See: https://github.com/golang/go/issues/21014
+    (cherry picked from commit e855d2ed36b6dc56f9238d8f312be267823a8b41)
+
+commit 4079b6f493c7a2cdbc09889d0c8d9895566f1956
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 15:42:43 2026 +0100
+
+    archive: fix listing entries with a leading slash as if they were in the root
+    
+    The check that an entry returned by an archiver is a direct child of
+    the directory being listed normalised a parent of "/" to the root, so
+    an entry named "/x" passed as a child of the root while "x/" and
+    "dir//x" were rejected.
+    
+    Decide by stripping the directory prefix and checking what is left
+    with sanitize.Leaf, which rejects an empty name, ".", ".." and any
+    name containing a "/". This also covers the leading slash case.
+    
+    (cherry picked from commit b88e237e8c6006ca0426c0364f5020340efb38fd)
+
+commit bc482e79ff357f8e726a25b3dbee5fc02e2fc48d
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 15:41:51 2026 +0100
+
+    archive: fix zip file entries named for a directory causing confusion
+    
+    A file entry in a zip whose name refers to a directory, such as ".",
+    "/", "" or "sub/.", was only skipped when it named the root of an
+    archive which was itself the root of the remote. When the archive was
+    found by listing its parent directory the entry appeared as a file
+    with the same name as the archive alongside the directory for it, and
+    copying the archive tried to write both. When the entry named a
+    subdirectory it appeared as a file alongside that directory, and with
+    that subdirectory mounted as the archive root the entry was taken to
+    be the single file the root points at, hiding every real entry.
+    
+    Skip any file entry whose last path component is "", "." or "..",
+    checked on the raw name before it is cleaned or joined on the prefix.
+    
+    (cherry picked from commit da352a2a1b1f1aa99ec1cb46ad82012deeb0c5e9)
+
+commit 7ef04886b9c00ae4839e60ddcc7a07c2310416fc
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Wed Sep 2 15:41:51 2026 +0100
+
+    archive: fix corrupt listings when listing a zip directory more than once
+    
+    The zip archiver handed out its cached directory tree directly. Any
+    caller which filters a listing in place (as the core listing code
+    does) altered the cache, so later listings of the same directory could
+    be corrupted.
+    
+    Return a copy of the cached listing instead.
+    
+    (cherry picked from commit 68eab60564a936716aa4df0aefd0929bb5c2902b)
+
+commit b70ebaba7befb942a6d7ddeb509db47ef13b80e4
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 5 11:49:37 2026 +0100
+
+    seafile: fix corrupted uploads after a retried upload error
+    
+    When an upload failed with a 500 error the upload was retried with a
+    new upload link but the same input stream. The stream had already been
+    consumed by the first attempt so the retry uploaded an empty file.
+    
+    This fixes it by returning a RetryError instead so the caller retries
+    the upload with a fresh stream, which will fetch a new upload link.
+    
+    (cherry picked from commit 6cdd0ea7610267997a93f984cf8f0af9ac5dd949)
+
+commit b03a9f8ea39fb6d825ce1c158b80755f08437656
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 5 11:49:36 2026 +0100
+
+    filescom: fix corrupted uploads after a retried upload error
+    
+    When an upload failed with a retryable error the pacer retried the
+    whole upload with the same input stream. The stream had already been
+    consumed by the first attempt so the retry uploaded an empty file.
+    
+    This fixes it by using CallNoRetry for the upload, as the other
+    backends do, so retryable errors are returned wrapped in a RetryError
+    for the caller to retry the upload with a fresh stream.
+    
+    It also makes 5xx errors from the upload storage servers retryable.
+    These come back from the SDK as a different error type to API errors
+    so were not being retried at all.
+    
+    (cherry picked from commit fa43f10af232373b4d724b40dccc73493e25e761)
+
+commit 8a2bed2f717ffa7a97ef7016f6eeb023ed473ce5
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Sat Sep 5 11:49:36 2026 +0100
+
+    pixeldrain: fix corrupted uploads after a retried upload error
+    
+    When an upload failed with a retryable error the pacer retried the
+    whole PUT with the same input stream. The stream had already been
+    consumed by the first attempt so the retry uploaded an empty file.
+    
+    This fixes it by using CallNoRetry for the upload, as the other
+    backends do, so retryable errors are returned wrapped in a RetryError
+    for the caller to retry the upload with a fresh stream.
+    
+    (cherry picked from commit f4cd80a5352b670a51cfab172456267c9265f2a2)
+
+commit df2a2d1127977bcc6e396f5a16e3c210d885dcdf
+Author: Shane McCarron <shane.mccarron@corvexconnect.com>
+Date:   Sun Aug 30 09:16:42 2026 -0500
+
+    fs/fshttp: fix TestCertificates leaking client cert/key onto global config
+    
+    This was fixed in this commit in an inelegant way
+    
+    399bc6a6a610dec4 fshttp: don't send --header values to other hosts on redirect
+    
+    The current commit fixes it properly with AddConfig.
+    
+    Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+    (cherry picked from commit 1b4dea8dac20cab6387d43fa2a45a8ac45088c89)
+
+commit 2e18447255959e354c367ccb22110c57b7a3c55c
+Author: PSR94 <88868390+PSR94@users.noreply.github.com>
+Date:   Tue Sep 1 11:48:43 2026 -0400
+
+    docs: update Huawei Drive client ID setup
+    
+    (cherry picked from commit b4c598dbe4a82fd6398197575b2111952c9a602d)
+
+commit ef6bae24c5030b34fef9e2b59a3d4ae38204f776
+Author: Nick Craig-Wood <nick@craig-wood.com>
+Date:   Fri Sep 4 18:21:52 2026 +0100
+
+    Start v1.75.2-DEV development

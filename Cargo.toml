@@ -9,6 +9,9 @@ rusqlite = { version = "0.40.2", features = ["backup"] }
 sqlparser = "0.63.0"
 turso = "0.8.3"
 tokio = { version = "1", features = ["rt", "macros"] }
+object_store = { version = "0.13", features = ["aws"] }
+futures-util = "0.3"
+zstd = "0.13"
 
 [features]
 bundled = ["rusqlite/bundled"]

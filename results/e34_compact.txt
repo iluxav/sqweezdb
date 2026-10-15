@@ -1,0 +1,12 @@
+=== E34: compression and compaction in the bucket (1M rows; local rclone S3 server; Litestream 0.5.17) ===
+A. snapshot: 49.3 MB on disk -> 6.0 MB in the bucket (zstd level 3, 8x), compressed in 57 ms, uploaded in 1.08 s total; E33 uncompressed: 49 MB in 1.1 s
+A. log chunks for 5 s of writes: 0.58 MB of records -> 0.15 MB in the bucket (3.8x), compression 0 ms total (0 MB/s)
+B. follower built from the bucket (6.1 MB downloaded): 1011082 rows (primary 1011082)
+B. cloud-durable burst, 64 writers for 6 s: 270849 commits, 8410 uploads -> the log prefix holds 6305 objects, 3.4 MB
+B. compaction (chunks older than 5 s, checked every 2 s): 5 merges, 8416 deletes in 12 s -> 4 objects, 2.9 MB
+B. follower after the burst and the compaction: 1281941 rows vs primary 1281941 (EXACT), max id 90000009 vs 90000009; a new commit is visible after 899 ms (median of 10, 1 s cadence), 8417 chunks pulled
+C. restore from the compacted bucket: 9 objects, 8.9 MB downloaded and decompressed, open 0.11 s total (replayed 281941 records) -> 1281941 rows vs primary 1281941 (EXACT)
+D. litestream: SQLite file 16.8 MB -> 43.2 MB in the bucket (3 objects, LZ4) after 4.2 s
+D. litestream: 274646 autocommit inserts in 6 s
+D. litestream bucket after the burst: 37 objects, 46.4 MB; 30 s later: 38 objects, 49.5 MB; restore 0.21 s -> 1274646 rows
+exit 0

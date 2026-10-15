@@ -1,0 +1,22 @@
+=== E33: backup to an S3-compatible bucket (1M rows; local rclone S3 server; Litestream 0.5.17 for SQLite) ===
+A. snapshot of 1000000 rows (49 MB) uploaded in 1.12 s
+A. 10 s at 2207 writes/s, upload every 1 s: 11 chunk uploads (1.1/s), newest record in the bucket was 462 ms old (median), 962 ms (max); cost at this cadence: 95040 requests/day = $14.26/month on S3 (R2 $12.83)
+B. cloud-durable commits,   1 writers:    2657 commits/s, latency p50 0.4 ms p99 0.8 ms, 2657 uploads/s (each upload carries 1 commits)
+B. cloud-durable commits,  16 writers:   16249 commits/s, latency p50 0.9 ms p99 2.0 ms, 1496 uploads/s (each upload carries 11 commits)
+B. cloud-durable commits, 256 writers:   41392 commits/s, latency p50 5.0 ms p99 18.5 ms, 924 uploads/s (each upload carries 45 commits)
+B. cloud-durable commits with a simulated 30 ms round trip,   1 writers:     21 commits/s, latency p50 31.4 ms p99 72.2 ms, 21 uploads/s (each upload carries 1 commits)
+B. cloud-durable commits with a simulated 30 ms round trip, 256 writers:   3966 commits/s, latency p50 64.1 ms p99 106.9 ms, 30 uploads/s (each upload carries 131 commits)
+C. bucket holds 15401 objects, 72 MB. Bad DELETE of Int(714924) rows then 10k inserts. Restore to the moment before it: download 15400 chunks + snapshot (s0 1001) 72 MB in 2.09 s, replay to seq 215925 (214924 records) 0.27 s -> 1214924 rows vs 1214924 then: EXACT
+D. follower built from the bucket: 510000 rows (primary 510000), caught up in 0.01 s
+D. commit on primary -> visible on the bucket follower, 1 s cadence: p50 991 ms, p99 1015 ms (0.9 uploads/s while writing)
+D. commit on primary -> visible on the bucket follower, 100 ms cadence: p50 119 ms, p99 203 ms (4.3 uploads/s while writing)
+E. ours, 1 s upload cadence: 2195 acknowledged writes/s for 5.0 s, kill -9, restore from the bucket in 0.10 s (5 chunks, 50 MB); last acknowledged id 1010973, last id in the bucket 1008802 -> 2171 rows lost (the last 989 ms of writes)
+E. ours, 1 s upload cadence: 2198 acknowledged writes/s for 5.4 s, kill -9, restore from the bucket in 0.10 s (6 chunks, 50 MB); last acknowledged id 1011805, last id in the bucket 1011024 -> 781 rows lost (the last 355 ms of writes)
+E. ours, 1 s upload cadence: 2204 acknowledged writes/s for 5.7 s, kill -9, restore from the bucket in 0.11 s (6 chunks, 50 MB); last acknowledged id 1012653, last id in the bucket 1011061 -> 1592 rows lost (the last 722 ms of writes)
+E. ours, 100 ms cadence: 2199 acknowledged writes/s for 6.1 s, kill -9, restore from the bucket in 0.11 s (61 chunks, 50 MB); last acknowledged id 1013434, last id in the bucket 1013334 -> 100 rows lost (the last 45 ms of writes)
+E. ours, cloud-durable commits: 1173 acknowledged writes/s for 6.5 s, kill -9, restore from the bucket in 0.82 s (7598 chunks, 50 MB); last acknowledged id 1007598, last id in the bucket 1007598 -> 0 rows lost (the last 0 ms of writes)
+E. litestream: initial snapshot in the bucket after 1.2 s (1 objects, 11 MB)
+E. litestream, 1 s sync interval: 2097 acknowledged writes/s for 5.0 s, kill -9 writer and litestream, restore 0.12 s (22 objects, 23 MB in the bucket); last acknowledged id 1010485, last id restored 1010135 -> 350 rows lost (the last 167 ms of writes)
+E. litestream, 1 s sync interval: 2111 acknowledged writes/s for 5.4 s, kill -9 writer and litestream, restore 0.15 s (46 objects, 34 MB in the bucket); last acknowledged id 1021821, last id restored 1021102 -> 719 rows lost (the last 341 ms of writes)
+E. litestream, 1 s sync interval: 2104 acknowledged writes/s for 5.7 s, kill -9 writer and litestream, restore 0.20 s (69 objects, 46 MB in the bucket); last acknowledged id 1033899, last id restored 1032400 -> 1499 rows lost (the last 712 ms of writes)
+exit 0

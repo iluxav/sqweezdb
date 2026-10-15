@@ -99,13 +99,13 @@ pub const SNAP_HDR: usize = 128;
 pub const LOG_BUF_CAP: usize = 32 << 20;
 /// Recent records kept in memory for in-process change feeds (they see a commit the moment it happens).
 pub const RECENT_CAP: usize = 32 << 20;
-pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub written: u64, pub durable: u64, pub stop: bool, pub batches: u64, pub bytes: u64, pub rotate: bool, pub segments: Vec<u64>, pub catalog: Vec<String>, pub sync_fd: Option<File>, pub writer_done: bool, pub recent: VecDeque<(u64, u8, u16, Arc<[u8]>)>, pub recent_bytes: usize }
+pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub written: u64, pub durable: u64, pub stop: bool, pub batches: u64, pub bytes: u64, pub rotate: bool, pub segments: Vec<u64>, pub catalog: Vec<String>, pub sync_fd: Option<File>, pub writer_done: bool, pub recent: VecDeque<(u64, u8, u16, Arc<[u8]>)>, pub recent_bytes: usize, pub cloud: u64, pub cloud_wait: bool, pub cloud_kick: Option<Arc<(Mutex<bool>, Condvar)>> }
 /// Writing and syncing are two threads: records reach the segment file (and so followers and change feeds) as soon as
 /// they are appended, independent of how long the current fsync takes; durability still comes from one fsync per batch.
 pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub cv_sync: Condvar, pub dir: PathBuf, /// live in-process change feeds; the memory ring is only kept while there is at least one
     pub feeds: std::sync::atomic::AtomicUsize }
 impl GLog {
-    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0 }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0) } }
+    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0, cloud: 0, cloud_wait: false, cloud_kick: None }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0) } }
     pub fn seg_path(&self, first: u64) -> PathBuf { Self::seg_path_in(&self.dir, first) }
     pub fn seg_path_in(dir: &Path, first: u64) -> PathBuf { dir.join(format!("log.{first:020}")) }
     pub fn list_segments(dir: &Path) -> Vec<u64> {
@@ -138,6 +138,14 @@ impl GLog {
     }
     pub fn snapshot_point(&self) -> (u64, Vec<String>) { let mut s = self.st.lock().unwrap(); s.rotate = true; self.cv_batch.notify_one(); (s.seq, s.catalog.clone()) }
     pub fn wait_durable(&self, seq: u64) { let mut s = self.st.lock().unwrap(); while s.durable < seq { s = self.cv_durable.wait(s).unwrap(); } }
+    /// Cloud-durable commit mode (E33): a write is acknowledged only once its record is in the bucket.
+    pub fn set_cloud_wait(&self, on: bool, kick: Option<Arc<(Mutex<bool>, Condvar)>>) { let mut s = self.st.lock().unwrap(); s.cloud_wait = on; s.cloud_kick = kick; }
+    /// Wait (bounded) until the writer thread has put everything appended so far into the segment file.
+    pub fn wait_written(&self, timeout: std::time::Duration) -> u64 { let mut s = self.st.lock().unwrap(); let target = s.seq; let deadline = Instant::now() + timeout; while s.written < target && Instant::now() < deadline { let (g, _) = self.cv_sync.wait_timeout(s, deadline.saturating_duration_since(Instant::now())).unwrap(); s = g; } s.written }
+    pub fn notify_cloud(&self, seq: u64) { let mut s = self.st.lock().unwrap(); if seq > s.cloud { s.cloud = seq; } self.cv_durable.notify_all(); }
+    pub fn wait_cloud(&self, seq: u64) { let mut s = self.st.lock().unwrap(); if let Some(k) = s.cloud_kick.clone() { let (m, cv) = &*k; *m.lock().unwrap() = true; cv.notify_all(); } while s.cloud < seq { s = self.cv_durable.wait(s).unwrap(); } }
+    /// What a write waits for before it is acknowledged: the local fsync (durable mode) and/or the bucket (cloud mode).
+    pub fn wait_commit(&self, seq: u64, durable: bool) { if durable { self.wait_durable(seq); } if self.st.lock().unwrap().cloud_wait { self.wait_cloud(seq); } }
     fn open_segment(&self, first: u64) -> File { OpenOptions::new().create(true).write(true).append(true).open(self.seg_path(first)).unwrap() }
     /// The writer thread: appends batches to the current segment and publishes `written`; the syncer makes them durable.
     pub fn committer(&self) {
@@ -438,7 +446,7 @@ impl Table {
             let (v, p) = Self::hdr_at(d, off); if v == 0 || self.pk_of(&d[off + 16..off + self.stride]) != pk { return Err(Abort::NotFound); } if p != 0 { return Err(Abort::Conflict); }
             let row = d[off + 16..off + self.stride].to_vec();
             let seq = self.log.append(OP_DELETE, self.id, &pk.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
-        if self.durable { self.log.wait_durable(seq); }
+        self.log.wait_commit(seq, self.durable);
         { let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride); d[off..off + 16].copy_from_slice(&[0u8; 16]); }
         match guard { Some(mut m) => { m.remove(&pk); drop(m); if let Some(k) = self.unique_key(&row) { self.uniq_remove(k, slot); } self.idx_remove(&row, slot); } None => self.unpublish(slot, &row) }
         self.free_slot(slot);
@@ -589,7 +597,7 @@ impl Table {
             let d = Self::alloc(&mut c, self.stride);
             d[off..off + 8].copy_from_slice(&0u64.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); d[off + 16..off + self.stride].copy_from_slice(row);
         }
-        if self.durable { self.log.wait_durable(seq); }
+        self.log.wait_commit(seq, self.durable);
         { let mut c = self.chunks[ck].write().unwrap();
           let d = Self::alloc(&mut c, self.stride);
           d[off..off + 8].copy_from_slice(&seq.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&0u64.to_le_bytes()); }
@@ -639,7 +647,7 @@ impl Table {
             d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes());
             if let Some(m) = &mut secm { Self::uniq_insert_locked(m, nh.unwrap(), slot); }
         }
-        if self.durable { self.log.wait_durable(seq); }
+        self.log.wait_commit(seq, self.durable);
         { let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride);
           d[off..off + 8].copy_from_slice(&seq.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&0u64.to_le_bytes()); d[off + 16..off + self.stride].copy_from_slice(&new); }
         if key_changed { if let Some(k) = old_key { self.uniq_remove(&k, slot); } }
@@ -1043,7 +1051,7 @@ impl Database {
                 d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes());
             }
         }
-        if self.durable { self.log.wait_durable(seq); }
+        self.log.wait_commit(seq, self.durable);
         // phase 3: publish
         for w in &txn.writes {
             let (t, slot) = (w.table(), w.slot());
