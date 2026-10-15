@@ -1,0 +1,9 @@
+=== E09: crash recovery round (kill -9 while writing) ===
+[ours]   kill -9 after   600ms: log   2.5 MB,   18612 records, torn tail 0 B | acked commits   18581 on  12401 ids | LOST: 0 | replay 0.006s
+[ours]   kill -9 after  1200ms: log   5.2 MB,   38225 records, torn tail 0 B | acked commits   38207 on  25482 ids | LOST: 0 | replay 0.014s
+[ours]   kill -9 after  2500ms: log  10.6 MB,   77177 records, torn tail 0 B | acked commits   77171 on  51456 ids | LOST: 0 | replay 0.026s
+[sqlite] kill -9 after  1200ms: rows in db    2169 | acked commits    2168 | LOST: 0 | open+recover 0.000s
+[sqlite] kill -9 after  2500ms: rows in db    4979 | acked commits    4978 | LOST: 0 | open+recover 0.000s
+[ours]   restart: replay 2999989 records (411 MB) into memory: 1.434s = 2.1M records/s, rows 2000000
+[sqlite] restart after kill with un-checkpointed WAL (READY wal=4320 MB): open + count(*) = 0.659s, rows 2000000
+[sqlite]   (+ full checkpoint of that WAL: 0.618s)

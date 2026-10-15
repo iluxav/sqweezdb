@@ -1,0 +1,14 @@
+=== E17: crash recovery for the SQL storage (kill -9, snapshots, catalog + ACL persisted) ===
+    victim snapshot: 15400 rows, 1.5 MB, low_water 23084, 0.003s, deleted 0 segment(s)
+    victim snapshot: 30835 rows, 3.1 MB, low_water 46228, 0.006s, deleted 1 segment(s)
+[sql+snapshots] kill -9 after 2000ms: snapshot 30835 rows, catalog 5 stmts, 2 segment(s), replayed 19021 skipped 23141 | acked 86818 writes on 43495 ids | LOST 0, stale 0 | total Int(43507) | alice sees Int(64) rows (policy owner=7 survived) | writes after recovery ok | restart 0.021s (load 0.004 + replay 0.017)
+    victim snapshot: 13022 rows, 1.3 MB, low_water 19522, 0.016s, deleted 0 segment(s)
+    victim snapshot: 28626 rows, 2.9 MB, low_water 42909, 0.005s, deleted 1 segment(s)
+    victim snapshot: 44008 rows, 4.4 MB, low_water 65986, 0.006s, deleted 1 segment(s)
+    victim snapshot: 59578 rows, 6.0 MB, low_water 89346, 0.007s, deleted 1 segment(s)
+    victim snapshot: 75105 rows, 7.5 MB, low_water 112626, 0.007s, deleted 1 segment(s)
+[sql+snapshots] kill -9 after 3600ms: snapshot 75105 rows, catalog 5 stmts, 2 segment(s), replayed 1007 skipped 23273 | acked 151321 writes on 75748 ids | LOST 0, stale 0 | total Int(75762) | alice sees Int(96) rows (policy owner=7 survived) | writes after recovery ok | restart 0.012s (load 0.005 + replay 0.007)
+snapshot of 2000000 rows: 200 MB in 0.165s
+restart A (snapshot 2000000 rows + 1M-record tail), 12 threads: 0.781s = load 0.212 + replay 1000000 records 0.570
+snapshot again: 0.165s, deleted 1 segment(s)
+restart B (snapshot 2000000 rows, empty tail), 12 threads: 0.185s = load 0.185 + replay 0 records

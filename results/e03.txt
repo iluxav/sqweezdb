@@ -1,0 +1,18 @@
+=== E03 CPU ceilings (no I/O) ===
+fixed-width rows, direct offset (ideal)          thr=1  ops/s=   103918780  per-op=9.6ns
+fixed-width rows, direct offset (ideal)          thr=8  ops/s=   485748238  per-op=16.5ns
+fixed-width rows, direct offset (ideal)          thr=12 ops/s=   594997588  per-op=20.2ns
+BTreeMap immutable, no lock                      thr=1  ops/s=     6160320  per-op=162.3ns
+BTreeMap immutable, no lock                      thr=8  ops/s=    45887856  per-op=174.3ns
+BTreeMap immutable, no lock                      thr=12 ops/s=    55645499  per-op=215.7ns
+HashMap immutable, no lock                       thr=1  ops/s=    23150431  per-op=43.2ns
+HashMap immutable, no lock                       thr=8  ops/s=   136565599  per-op=58.6ns
+HashMap immutable, no lock                       thr=12 ops/s=   155019046  per-op=77.4ns
+BTreeMap behind std RwLock (read lock/op)        thr=1  ops/s=     5413947  per-op=184.7ns
+BTreeMap behind std RwLock (read lock/op)        thr=8  ops/s=    20736859  per-op=385.8ns
+BTreeMap behind std RwLock (read lock/op)        thr=12 ops/s=    24433063  per-op=491.1ns
+BTreeMap behind std Mutex (lock/op)              thr=1  ops/s=     5321973  per-op=187.9ns
+BTreeMap behind std Mutex (lock/op)              thr=8  ops/s=     3621633  per-op=2208.9ns
+append 112B row to log + hash index insert       thr=1  ops/s=    35026592  per-op=28.5ns
+BTreeMap insert sequential 112B rows             thr=1  ops/s=    13306663  per-op=75.2ns
+BTreeMap insert RANDOM keys 112B rows            thr=1  ops/s=     4160119  per-op=240.4ns

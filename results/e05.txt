@@ -1,0 +1,28 @@
+=== E05 / H1: engine core with group commit, typed rows, conflict checks ===
+SQLite refs (E00, system lib): 1 row/txn FULL 2,000-2,160 txn/s | NORMAL 115k-165k | 8 writers NORMAL 88k, p99 565us | 4 writers FULL 1,730
+insert new rows                DURABLE  thr=1    txn/s=      2186 p50=   415.9us p99=   935.7us retries=0      (0.91s)
+insert new rows                DURABLE  thr=4    txn/s=      4171 p50=   871.4us p99=  3217.4us retries=0      (1.92s)
+insert new rows                DURABLE  thr=16   txn/s=     16131 p50=   894.4us p99=  3256.0us retries=0      (1.98s)
+insert new rows                DURABLE  thr=64   txn/s=     57757 p50=   994.7us p99=  3592.2us retries=0      (2.22s)
+insert new rows                DURABLE  thr=256  txn/s=    188229 p50=  1186.0us p99=  5714.5us retries=0      (2.72s)
+update random row (1M)         DURABLE  thr=1    txn/s=      2059 p50=   432.4us p99=  2347.0us retries=0      (0.97s)
+update random row (1M)         DURABLE  thr=4    txn/s=      4167 p50=   850.1us p99=  3500.5us retries=0      (1.92s)
+update random row (1M)         DURABLE  thr=16   txn/s=     16082 p50=   896.5us p99=  3372.5us retries=0      (1.99s)
+update random row (1M)         DURABLE  thr=64   txn/s=     56630 p50=   993.4us p99=  3872.7us retries=12     (2.26s)
+update random row (1M)         DURABLE  thr=256  txn/s=    192089 p50=  1192.3us p99=  3899.8us retries=141    (2.67s)
+update 50% hot (1000 keys)     DURABLE  thr=16   txn/s=     16011 p50=   899.9us p99=  3539.6us retries=102    (2.00s)
+update 50% hot (1000 keys)     DURABLE  thr=64   txn/s=     57528 p50=   991.7us p99=  3734.9us retries=1935   (2.22s)
+update 50% hot (1000 keys)     DURABLE  thr=256  txn/s=    188852 p50=  1204.4us p99=  4021.2us retries=32357  (2.71s)
+update random row (1M)         DURABLE  thr=64   txn/s=     52558 p50=  1056.9us p99=  4337.1us retries=6      (2.44s)  + 4 readers: 21075881 reads/s
+  (preload 1M rows 0.12s; log: 2164000 txns, 52161 fsync batches, 270 MB)
+insert new rows                visible  thr=1    txn/s=   2880183 p50=     0.1us p99=     2.1us retries=0      (0.69s)
+insert new rows                visible  thr=4    txn/s=   4462452 p50=     0.4us p99=     4.7us retries=0      (0.45s)
+insert new rows                visible  thr=8    txn/s=   3754147 p50=     0.9us p99=    10.0us retries=0      (0.53s)
+insert new rows                visible  thr=12   txn/s=   3203339 p50=     1.5us p99=    19.5us retries=0      (0.62s)
+update random row (1M)         visible  thr=1    txn/s=   1841740 p50=     0.5us p99=     1.1us retries=0      (1.09s)
+update random row (1M)         visible  thr=4    txn/s=   4269418 p50=     0.6us p99=     4.1us retries=3      (0.47s)
+update random row (1M)         visible  thr=8    txn/s=   3578765 p50=     1.0us p99=     9.7us retries=1      (0.56s)
+update random row (1M)         visible  thr=12   txn/s=   3417625 p50=     1.4us p99=    18.2us retries=5      (0.59s)
+update 50% hot (1000 keys)     visible  thr=8    txn/s=   3844969 p50=     0.9us p99=     9.7us retries=270    (0.52s)
+update random row (1M)         visible  thr=8    txn/s=   3625185 p50=     0.8us p99=    11.9us retries=2      (0.55s)  + 4 readers: 9635377 reads/s
+  (preload 1M rows 0.13s; log: 19999984 txns, 6121 fsync batches, 2500 MB)

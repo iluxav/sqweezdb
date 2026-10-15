@@ -1,0 +1,48 @@
+=== E19a: NULL and DELETE semantics vs SQLite ===
+ok   insert                                               ours=""  sqlite="1 affected"
+ok   insert                                               ours=""  sqlite="1 affected"
+ok   insert                                               ours=""  sqlite="1 affected"
+ok   insert                                               ours=""  sqlite="1 affected"
+ok   insert                                               ours=""  sqlite="1 affected"
+ok   NULL into NOT NULL column                            ours="ERR column n is NOT NULL"  sqlite="ERR NOT NULL constraint failed: t.n"
+DIFF NULL into primary key                                ours="ERR column id is NOT NULL"  sqlite="1 affected"
+DIFF count(*), count(a), count(b), sum, avg, min, max     ours="5|3|3|40|2.667|1.500|4.000"  sqlite="6|4|4|41|2.250|1.000|4.000"
+DIFF GROUP BY nullable column                             ours="NULL|2|2.500 ; 10|2|5.500 ; 20|1|NULL"  sqlite="NULL|2|2.500 ; 1|1|1.000 ; 10|2|5.500 ; 20|1|NULL"
+ok   WHERE a > 10 (NULLs excluded)                        ours="3"  sqlite="3"
+ok   WHERE a IS NULL                                      ours="2 ; 4"  sqlite="2 ; 4"
+ok   WHERE b IS NOT NULL AND s = 'x'                      ours="1"  sqlite="1"
+ok   WHERE a = NULL (never true)                          ours=""  sqlite=""
+ok   sum over an all-NULL set                             ours="NULL|NULL"  sqlite="NULL|NULL"
+DIFF rows with NULLs rendered                             ours="1|10|1.500|x ; 2|NULL|2.500|y ; 3|20|NULL|NULL ; 4|NULL|NULL|x ; 5|10|4.000|z"  sqlite="1|10|1.500|x ; 2|NULL|2.500|y ; 3|20|NULL|NULL ; 4|NULL|NULL|x ; 5|10|4.000|z ; 6|1|1.000|q"
+ok   UPDATE to NULL                                       ours=""  sqlite="1 affected"
+ok   WHERE a IS NULL after update                         ours="1 ; 2 ; 4"  sqlite="1 ; 2 ; 4"
+ok   UPDATE NOT NULL column to NULL                       ours="ERR Type(\"column n is NOT NULL\")"  sqlite="ERR NOT NULL constraint failed: t.n"
+ok   DELETE by pk                                         ours="1"  sqlite="1 affected"
+ok   DELETE WHERE a IS NULL (multi-row, atomic)           ours="2"  sqlite="2 affected"
+DIFF remaining rows                                       ours="3|20 ; 5|10"  sqlite="3|20 ; 5|10 ; 6|1"
+ok   DELETE missing row                                   ours="0"  sqlite="0 affected"
+DIFF count after deletes                                  ours="2"  sqlite="3"
+ok   BEGIN                                                ours=""  sqlite="0 affected"
+ok   DELETE in txn                                        ours="1"  sqlite="1 affected"
+ok   visible inside txn?                                  ours=""  sqlite=""
+ok   ROLLBACK                                             ours=""  sqlite="1 affected"
+ok   row 5 back after rollback                            ours="5"  sqlite="5"
+ok   BEGIN                                                ours=""  sqlite="1 affected"
+ok   insert 9 in txn                                      ours=""  sqlite="1 affected"
+ok   delete 9 in same txn                                 ours="1"  sqlite="1 affected"
+ok   COMMIT                                               ours=""  sqlite="1 affected"
+ok   row 9 absent                                         ours=""  sqlite=""
+ok   BEGIN                                                ours=""  sqlite="1 affected"
+ok   delete 3 in txn                                      ours="1"  sqlite="1 affected"
+ok   re-insert 3 in same txn                              ours=""  sqlite="1 affected"
+ok   COMMIT                                               ours=""  sqlite="1 affected"
+ok   row 3 replaced                                       ours="3|77|re"  sqlite="3|77|re"
+--- recovery after deletes ---
+ok   reopen: snapshot 2 rows + 1 replayed records; rows after = ["3|77|7.000|re", "5|10|4.000|z", "10|NULL|NULL|NULL"]
+semantic checks: 32 ok, 6 different
+--- delete throughput (1M rows, 200k deletes by pk; one 100k-row DELETE statement) ---
+[ours]   DELETE by pk: 0.73 us each (181264 rows deleted)
+[ours]   DELETE WHERE v = 3 (scan, one atomic statement): Int(81883) rows in 56.5 ms
+[ours]   remaining: Int(736853)
+[sqlite] DELETE by pk, 1 row/txn NORMAL: 13.31 us each (181264 rows deleted)
+[sqlite] DELETE WHERE v = 3: 81883 rows in 199.1 ms

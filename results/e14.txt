@@ -1,0 +1,14 @@
+=== E14 / H24: multi-statement transactions ===
+[sqlite] load 1M rows, 1000-row transactions, NORMAL                 859413 /s      1.164 us each
+[sqlite] transfer txns (2 reads + 2 updates), 4 thr, sync=NORMAL, retries 0, sum ok=true      35768 /s     27.958 us each
+[sqlite] transfer txns (2 reads + 2 updates), 4 thr, sync=FULL, retries 0, sum ok=true       1711 /s    584.581 us each
+[ours]   load 1M rows, 1000-row transactions                         961184 /s      1.040 us each
+[ours]   read-your-writes inside txn: 1 row(s); after ROLLBACK: 0 row(s)
+[ours]   inserting a duplicate id inside a txn then COMMIT: "Duplicate"
+[ours]   transfer txns (2 reads + 2 updates), 1 thr, conflicts 0, sum ok=true     391687 /s      2.553 us each
+[ours]   transfer txns (2 reads + 2 updates), 4 thr, conflicts 0, sum ok=true    1258067 /s      0.795 us each
+[ours]   transfer txns (2 reads + 2 updates), 12 thr, conflicts 6, sum ok=true    1013055 /s      0.987 us each
+[ours durable] load 512000 rows, 1000-row transactions, 64 threads, fsync per txn    1014122 /s      0.986 us each
+[ours durable] transfer txns (2 reads + 2 updates), 4 thr, conflicts 0, sum ok=true       4588 /s    217.975 us each
+[ours durable] transfer txns (2 reads + 2 updates), 64 thr, conflicts 23, sum ok=true      62435 /s     16.017 us each
+[ours durable] transfer txns (2 reads + 2 updates), 256 thr, conflicts 32435, sum ok=true     193356 /s      5.172 us each

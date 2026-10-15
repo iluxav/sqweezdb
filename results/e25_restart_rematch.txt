@@ -1,0 +1,17 @@
+=== E25: restart and memory rematch, 2M rows (E22: SQLite 7 MB / ~1 ms restart; ours 424 MB / 0.177 s) ===
+snapshot: 2000000 rows, 333 MB, 0.371s (sqlite file 281 MB)
+-- warm page cache --
+sqlite warm: open 0.271 ms | first read 0.005 ms | 1000 reads 1.8 ms | 100k by id 0.12 s, 100k by name->id 0.13 s, 100k by name->row 0.22 s, filtered count 0.05 s | rss=8 MB (owned 3 + file-backed 5), peak=8 (check 1233321 100733461)
+ours warm (2000000 rows mapped, snapshot part 0.327 ms): open 0.476 ms | first read 0.010 ms | 1000 reads 1.4 ms | 100k by id 0.05 s, 100k by name->id 0.04 s, 100k by name->row 0.04 s, filtered count 0.01 s | rss=326 MB (owned 2 + file-backed 324), peak=326 (check 1233321 100733461)
+-- cold page cache (files evicted first) --
+sqlite cold: open 0.474 ms | first read 0.249 ms | 1000 reads 79.0 ms | 100k by id 3.10 s, 100k by name->id 0.14 s, 100k by name->row 0.22 s, filtered count 0.05 s | rss=8 MB (owned 3 + file-backed 5), peak=8 (check 1233321 100733461)
+ours cold (2000000 rows mapped, snapshot part 1.073 ms): open 1.234 ms | first read 1.874 ms | 1000 reads 160.3 ms | 100k by id 0.05 s, 100k by name->id 0.06 s, 100k by name->row 0.04 s, filtered count 0.01 s | rss=325 MB (owned 2 + file-backed 323), peak=325 (check 1233321 100733461)
+-- cold, inside a cgroup with a hard memory cap --
+sqlite cold: open 0.453 ms | first read 0.288 ms | 1000 reads 82.0 ms | 100k by id 5.54 s, 100k by name->id 1.34 s, 100k by name->row 10.64 s, filtered count 0.13 s | rss=8 MB (owned 3 + file-backed 5), peak=8 (check 1233321 100733461) under 64 MB cap
+ours cold (2000000 rows mapped, snapshot part 1.139 ms): open 1.326 ms | first read 1.924 ms | 1000 reads 343.1 ms | 100k by id 6.40 s, 100k by name->id 9.26 s, 100k by name->row 8.56 s, filtered count 0.18 s | rss=64 MB (owned 2 + file-backed 62), peak=69 (check 1233321 100733461) under 64 MB cap
+sqlite cold: open 2.044 ms | first read 0.280 ms | 1000 reads 100.0 ms | 100k by id 6.60 s, 100k by name->id 4.24 s, 100k by name->row 13.00 s, filtered count 0.12 s | rss=8 MB (owned 3 + file-backed 5), peak=8 (check 1233321 100733461) under 32 MB cap
+ours cold (2000000 rows mapped, snapshot part 2.135 ms): open 2.334 ms | first read 2.676 ms | 1000 reads 298.3 ms | 100k by id 7.56 s, 100k by name->id 13.13 s, 100k by name->row 13.26 s, filtered count 0.19 s | rss=37 MB (owned 2 + file-backed 35), peak=37 (check 1233321 100733461) under 32 MB cap
+sqlite cold: open 0.423 ms | first read 0.272 ms | 1000 reads 80.5 ms | 100k by id 7.64 s, 100k by name->id 6.06 s, 100k by name->row 15.19 s, filtered count 0.18 s | rss=8 MB (owned 3 + file-backed 5), peak=8 (check 1233321 100733461) under 16 MB cap
+ours cold (2000000 rows mapped, snapshot part 1.109 ms): open 1.293 ms | first read 1.977 ms | 1000 reads 297.9 ms | 100k by id 8.29 s, 100k by name->id 15.38 s, 100k by name->row 15.59 s, filtered count 0.19 s | rss=22 MB (owned 2 + file-backed 20), peak=22 (check 1233321 100733461) under 16 MB cap
+-- writes against a mapped table (page cache warmed first; runs last because it changes the data) --
+ours writes after restart (warm): 100k in-place updates 0.172 s, 100k inserts 0.121 s, 10k deletes 0.015 s | rss=346 MB (owned 247 + file-backed 99), peak=346 | counts before (2090029, 97103) after re-snapshot+restart (2090029, 97103) (2090029 rows, 346 MB, 0.367 s; reopen 0.214 ms)

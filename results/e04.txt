@@ -1,0 +1,25 @@
+=== E04 SQLite query baseline (system libsqlite3) ===
+build: 1000000 users + 5000000 orders in 1.9s, indexes+analyze 2.0s, file 279 MB
+[default] Q1 full scan filter: count(*) users WHERE age>40   median=    23.366ms  calls/s=       43  rows/s=    42797395
+[default] Q2 group by country avg(score),count(*)            median=   176.207ms  calls/s=        6  rows/s=     5675150
+[default] Q3 PK range scan 1000 rows sum(score)              median=     0.028ms  calls/s=    35486  rows/s=    35486160
+[default] Q4 secondary UNIQUE index lookup by email          median=     0.001ms  calls/s=   800000  rows/s=      800000
+[default] Q5 secondary index range: orders of one user (~5 rows) median=     0.006ms  calls/s=   158228  rows/s=      791139
+[default] Q6 join 100 users -> their ~500 orders, group by   median=     0.377ms  calls/s=     2652  rows/s=     1325775
+[default] Q7 big join: orders x users WHERE country='C07' (~250k) median=   218.223ms  calls/s=        5  rows/s=     1145619
+[default] Q8 ORDER BY score DESC LIMIT 10 (no index, 1M rows) median=    27.927ms  calls/s=       36  rows/s=    35807194
+[default] Q9 full scan sum(amount) over 5M orders            median=   110.805ms  calls/s=        9  rows/s=    45124498
+[default] Q4 secondary index lookup, 8 threads               lookups/s=  3470040
+[tuned] Q1 full scan filter: count(*) users WHERE age>40     median=    19.381ms  calls/s=       52  rows/s=    51597763
+[tuned] Q2 group by country avg(score),count(*)              median=   157.521ms  calls/s=        6  rows/s=     6348367
+[tuned] Q3 PK range scan 1000 rows sum(score)                median=     0.025ms  calls/s=    39777  rows/s=    39777247
+[tuned] Q4 secondary UNIQUE index lookup by email            median=     0.001ms  calls/s=   917431  rows/s=      917431
+[tuned] Q5 secondary index range: orders of one user (~5 rows) median=     0.005ms  calls/s=   182815  rows/s=      914077
+[tuned] Q6 join 100 users -> their ~500 orders, group by     median=     0.303ms  calls/s=     3300  rows/s=     1650062
+[tuned] Q7 big join: orders x users WHERE country='C07' (~250k) median=   186.761ms  calls/s=        5  rows/s=     1338606
+[tuned] Q8 ORDER BY score DESC LIMIT 10 (no index, 1M rows)  median=    25.065ms  calls/s=       40  rows/s=    39896028
+[tuned] Q9 full scan sum(amount) over 5M orders              median=   105.371ms  calls/s=        9  rows/s=    47451426
+[tuned] Q4 secondary index lookup, 8 threads                 lookups/s=  4905784
+W1 bulk insert 1000/txn WITH unique secondary index          rows/s=   935119  (E00 without secondary index: ~2,000,000)
+W2 1 row/txn UPDATE of indexed column, WAL NORMAL            txn/s=    24108  p50=10.7us  (E00 non-indexed column: ~120k-165k txn/s, 3.5us)
+W3 1 row/txn UPDATE of non-indexed column (same table)       txn/s=    66506  p50=4.4us

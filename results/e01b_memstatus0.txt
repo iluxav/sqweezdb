@@ -1,0 +1,10 @@
+=== E01b sqlite knobs: MEMSTATUS=0 (config rc=0) ===
+cache 2MB (default), autocommit                            thr=8  reads/s=    825007  per-read=9697ns
+cache 2MB (default), long txn                              thr=8  reads/s=   1031654  per-read=7755ns
+cache 256MB, autocommit                                    thr=8  reads/s=    825220  per-read=9694ns
+cache 256MB, long txn                                      thr=8  reads/s=   1130776  per-read=7075ns
+cache 256MB, long txn                                      thr=12 reads/s=    963148  per-read=12459ns
+cache 256MB, long txn                                      thr=1  reads/s=   1648053  per-read=607ns
+SEPARATE files, cache 256MB, autocommit                    thr=8  reads/s=    917270  per-read=8722ns
+mmap 1GB, long txn (reference)                             thr=8  reads/s=  13031505  per-read=614ns
+mmap 1GB, long txn (reference)                             thr=1  reads/s=   1882434  per-read=531ns

@@ -1,0 +1,26 @@
+=== E16: access control (roles, grants, row policies) ===
+--- behaviour ---
+app:    SELECT count(*) FROM docs                                      -> 1 row(s) [Int(1000000)]
+root:   SELECT count(*) FROM docs                                      -> 1 row(s) [Int(1000000)]
+alice:  SELECT count(*) FROM docs            (policy: tenant = 7)      -> 1 row(s) [Int(1000)]
+alice:  SELECT title FROM docs WHERE id = 7  (tenant 7)                -> 1 row(s) [Text("doc 7")]
+alice:  SELECT title FROM docs WHERE id = 8  (tenant 8)                -> 0 row(s)
+alice:  SELECT count(*) FROM docs WHERE tenant = 8 (asks for another tenant) -> 1 row(s) [Int(0)]
+alice:  INSERT a doc with tenant 8                                     -> ERROR: permission denied: row violates a policy on docs
+alice:  INSERT a doc with tenant 7                                     -> 0 row(s)
+alice:  UPDATE docs SET title = 'x' WHERE id = 7  (no UPDATE grant)    -> ERROR: permission denied: user alice lacks UPDATE on docs
+bob:    SELECT count(*) FROM docs            (policy: tenant = 8)      -> 1 row(s) [Int(1000)]
+nobody: SELECT count(*) FROM docs            (no grants)               -> ERROR: permission denied: user nobody lacks SELECT on docs
+alice:  CREATE ROLE hacker                                             -> ERROR: permission denied: only the application session can manage roles, users and policies
+root:   UPDATE docs SET title = 'x' WHERE id = 7                       -> 0 row(s)
+alice:  SELECT title FROM docs WHERE id = 7  (sees root's change)      -> 1 row(s) [Text("x")]
+--- cost ---
+point read by id as app (no user): 500000 rows returned of 500k           2843253 /s     0.352 us
+point read by id as root (grant check): 500000 rows returned of 500k      2564059 /s     0.390 us
+point read by id as alice (grant + row policy): 562 rows returned of 500k    2319364 /s     0.431 us
+count(*) over 1M rows as app                                              5.760 ms per scan
+count(*) over 1M rows as alice (policy filters 1M rows)                   3.314 ms per scan
+point read as alice, 8 threads (2039 rows returned of 2M)                12311332 /s     0.081 us
+--- SQLite for reference: no users, roles or policies exist ---
+any connection: SELECT count(*) FROM docs -> 1000000 rows; isolation must be re-implemented in every query by the application, and one forgotten WHERE tenant = ? leaks everything
+count(*) WHERE tenant = 7 (the clause the app must add itself)           21.380 ms per scan

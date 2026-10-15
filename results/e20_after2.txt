@@ -1,0 +1,4 @@
+T1 3-table join, filters on both small sides               sqlite    79.428 ms   ours    12.425 ms   6x   same result
+T2 3-table join + GROUP BY product category                sqlite  4659.722 ms   ours   105.118 ms   44x   same result
+T4 2-table join, category filter (SQLite has the index)    sqlite     1.506 ms   ours     3.415 ms   0x   same result
+T3 one order with its user and product (point, 3 tables)   sqlite     1.743 us   ours     1.416 us   1x   same result

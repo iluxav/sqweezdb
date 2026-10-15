@@ -1,0 +1,6 @@
+=== E23 / H34: second-process reads over shared memory (E21 refs: socket 3.15 us / 1.45M on 8; SQLite shared file 1.02 us / 5.2M on 8) ===
+[ours, 2nd process, shared-memory ring] point read (check 99825557805)        0.58 us/op    1714521 ops/s
+[ours, 2nd process, shared-memory ring] insert, not durable                   1.18 us/op     847344 ops/s
+[ours, 2nd process, shared-memory ring] point reads, 4 connections            0.17 us/op    5879301 ops/s
+[ours, 2nd process, shared-memory ring] point reads, 8 connections            0.16 us/op    6429202 ops/s
+owner sees count(*) = Int(1050000) after the client's inserts

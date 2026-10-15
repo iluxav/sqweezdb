@@ -1,0 +1,7 @@
+L4 Table::scan + bitmap probe + count/sum on hits (J1 by hand)            11.672 ms    2.33 ns/row   (check 62263999.5)
+L5 SQL: SELECT count(*), sum(amount) FROM orders                          21.154 ms    4.23 ns/row   (check 1249803777.3)
+L6 SQL: SELECT count(*) FROM orders WHERE status = 2                      13.475 ms    2.70 ns/row   (check 1250000.0)
+L7 SQL J1: join + filter on users (E18: 91 ms)                            17.935 ms    3.59 ns/row   (check 62263999.5)
+L8 SQL J2: join + GROUP BY country (E18: 118 ms)                         109.616 ms   21.92 ns/row   (check 20.0)
+L7 SQL J1: join + filter on users (E18: 91 ms)                            18.570 ms    3.71 ns/row   (check 62263999.5)
+L8 SQL J2: join + GROUP BY country (E18: 118 ms)                          84.119 ms   16.82 ns/row   (check 20.0)

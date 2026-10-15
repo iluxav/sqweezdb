@@ -1,0 +1,6 @@
+=== E22: memory and restart rematch (2M rows; E12: ours 470 MB, 714 MB peak; E17 restart 0.185 s) ===
+snapshot: 2000000 rows, 282 MB, 0.223s
+sqlite default 2MB cache: rss=7 MB peak=7 MB (check 1233321 50225356)
+sqlite tuned 256MB cache + mmap: rss=274 MB peak=274 MB (check 1233321 50225356)
+ours, 2M rows loaded through SQL: rss=424 MB peak=424 MB (check 1233321 50225356)
+ours, restart from a snapshot of 2000000 rows: 0.177s (load 0.177s), rss=423 MB peak=486 MB (check 1233321 50225356)

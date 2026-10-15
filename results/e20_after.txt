@@ -1,0 +1,9 @@
+T1 3-table join, filters on both small sides               sqlite    79.593 ms   ours    11.723 ms   6x   same result
+T2 3-table join + GROUP BY product category                sqlite  4658.124 ms   ours   104.205 ms   44x   same result
+T4 2-table join, category filter (SQLite has the index)    sqlite     1.511 ms   ours     2.710 ms   0x   same result
+S1 IN (subquery) semi-join                                 sqlite   180.269 ms   ours    22.841 ms   7x   same result
+S2 NOT IN (subquery)                                       sqlite   251.616 ms   ours    21.687 ms   11x   same result
+S3 IN (list)                                               sqlite    95.818 ms   ours    16.839 ms   5x   same result
+S4 scalar subquery                                         sqlite   243.264 ms   ours    56.564 ms   4x   same result
+S5 IN (subquery over a non-key column)                     sqlite    98.773 ms   ours    18.252 ms   5x   same result
+T3 one order with its user and product (point, 3 tables)   sqlite     1.716 us   ours     1.342 us   1x   same result

@@ -1,0 +1,10 @@
+=== E20: three-table joins and subqueries (same SQL both sides) ===
+T1 3-table join, filters on both small sides               sqlite    77.962 ms   ours    57.442 ms   1x   same result
+T2 3-table join + GROUP BY product category                sqlite  4672.233 ms   ours   106.771 ms   43x   same result
+T4 2-table join, category filter (SQLite has the index)    sqlite     1.590 ms   ours    41.769 ms   0x   same result
+S1 IN (subquery) semi-join                                 sqlite   184.697 ms   ours    23.640 ms   7x   same result
+S2 NOT IN (subquery)                                       sqlite   252.860 ms   ours    20.838 ms   12x   same result
+S3 IN (list)                                               sqlite    97.286 ms   ours    16.169 ms   6x   same result
+S4 scalar subquery                                         sqlite   248.601 ms   ours    55.658 ms   4x   same result
+S5 IN (subquery over a non-key column)                     sqlite    99.999 ms   ours    18.321 ms   5x   same result
+T3 one order with its user and product (point, 3 tables)   sqlite     1.729 us   ours     1.370 us   1x   same result

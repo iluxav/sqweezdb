@@ -1,0 +1,32 @@
+=== E13: the SQL round (same SQL text on both sides) ===
+[sqlite] load 1M rows via INSERT (one transaction)            1018999 calls/s      0.981 us/call
+[sqlite] text 'abc' into DOUBLE column: accepted, stored as text:abc
+[sqlite] Q1 point read by id (check 500585265)                1121028 calls/s      0.892 us/call
+[sqlite] Q1 point read by id, 8 threads                       5590211 calls/s      0.179 us/call
+[sqlite] Q2 lookup by name (unique index) (check 250345845056)     953545 calls/s      1.049 us/call
+[sqlite] Q3 count(*) WHERE age > 40                        median    21.133 ms
+[sqlite] Q4 GROUP BY country avg,count                     median   109.892 ms
+[sqlite] Q5 range sum, 1000 rows (check 10008129945)            35901 calls/s     27.854 us/call
+[sqlite] Q6 ORDER BY score DESC LIMIT 10                   median    27.203 ms
+[sqlite] Q7 sum WHERE country=7 AND age BETWEEN 30 AND 50  median    20.712 ms
+[sqlite] W1 UPDATE by id, 1 row/txn, sync=NORMAL                68582 calls/s     14.581 us/call
+[sqlite] W2 INSERT 1 row/txn, sync=NORMAL (not durable)         51215 calls/s     19.525 us/call
+[sqlite] W3 INSERT 1 row/txn, sync=FULL (durable), 1 thread       2163 calls/s    462.316 us/call
+[sqlite] W3 INSERT 1 row/txn, sync=FULL, 4 threads               1586 calls/s    630.425 us/call
+[ours]   load 1M rows via INSERT (1 row per call, not durable)     727494 calls/s      1.375 us/call
+[ours]   text 'abc' into DOUBLE column: rejected (column score: type mismatch: column is DOUBLE, value is Text("abc"))
+[ours]   Q1 point read by id (check 500585265)                2506102 calls/s      0.399 us/call
+[ours]   Q1 point read by id, 8 threads                      20051420 calls/s      0.050 us/call
+[ours]   Q2 lookup by name (unique index) (check 250345845056)    2138004 calls/s      0.468 us/call
+[ours]   Q3 count(*) WHERE age > 40                        median     3.771 ms
+[ours]   Q4 GROUP BY country avg,count                     median     5.444 ms
+[ours]   Q5 range sum, 1000 rows (check 10008129945)            64866 calls/s     15.416 us/call
+[ours]   Q6 ORDER BY score DESC LIMIT 10                   median    16.790 ms
+[ours]   Q7 sum WHERE country=7 AND age BETWEEN 30 AND 50  median     3.756 ms
+[ours]   W1 UPDATE by id, 1 row/txn (not durable)             1384543 calls/s      0.722 us/call
+[ours]   W2 INSERT 1 row/txn (not durable)                    1068288 calls/s      0.936 us/call
+[ours]   checks: Q3=Int(739998) Q4[7]=[Int(7), Float(16339.620226166702), Int(60000)] Q7=Float(332008830.0700008)
+[ours]   W3 INSERT 1 row/txn, durable (fsync), 1 threads         2261 calls/s    442.232 us/call
+[ours]   W3 INSERT 1 row/txn, durable (fsync), 4 threads         4556 calls/s    219.501 us/call
+[ours]   W3 INSERT 1 row/txn, durable (fsync), 64 threads       57253 calls/s     17.466 us/call
+[ours]   W3 INSERT 1 row/txn, durable (fsync), 256 threads     177907 calls/s      5.621 us/call

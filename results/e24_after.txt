@@ -1,0 +1,6 @@
+C1 EXISTS (orders of the user above 499)                                       sqlite    2956.6 ms   ours      17.4 ms    170x   same result
+C2 NOT EXISTS (users with no orders)                                           sqlite     289.2 ms   ours     216.3 ms      1x   same result
+C3 scalar in WHERE: amount above the user's own average (outer bounded to 500k) sqlite    1769.3 ms   ours     495.1 ms      3x   same result
+C4 scalar in SELECT: order count per user, 1000 users                          sqlite       0.3 ms   ours       0.2 ms      1x   same result
+C5 correlated IN: user_id IN (users whose country = order status), outer bounded to 1000 sqlite    2895.4 ms   ours      76.8 ms     37x   same result
+C6 scalar in SELECT: max order per user, 50k users                             sqlite     156.7 ms   ours     542.9 ms      0x   same result

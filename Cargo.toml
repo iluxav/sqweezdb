@@ -1,0 +1,15 @@
+[package]
+name = "dblab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memmap2 = "0.9.11"
+rusqlite = { version = "0.40.2" }
+sqlparser = "0.63.0"
+
+[features]
+bundled = ["rusqlite/bundled"]
+
+[profile.release]
+debug = 1

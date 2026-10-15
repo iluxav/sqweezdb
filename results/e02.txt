@@ -1,0 +1,11 @@
+=== E02 durable write physics ===
+group commit, 128B txns, 1 shared log    writers=1    durable txn/s=    2281  fsyncs=2000   avg batch=1.0  (0.88s)
+group commit, 128B txns, 1 shared log    writers=4    durable txn/s=    4608  fsyncs=3997   avg batch=2.0  (1.74s)
+group commit, 128B txns, 1 shared log    writers=16   durable txn/s=   18232  fsyncs=3841   avg batch=8.3  (1.76s)
+group commit, 128B txns, 1 shared log    writers=64   durable txn/s=   63142  fsyncs=3884   avg batch=33.0  (2.03s)
+group commit, 128B txns, 1 shared log    writers=256  durable txn/s=  204070  fsyncs=3957   avg batch=129.4  (2.51s)
+parallel fdatasync, separate files       threads=1    aggregate fsync/s=    1943  per-thread=1943/s
+parallel fdatasync, separate files       threads=2    aggregate fsync/s=    2248  per-thread=1124/s
+parallel fdatasync, separate files       threads=4    aggregate fsync/s=    4332  per-thread=1083/s
+parallel fdatasync, separate files       threads=8    aggregate fsync/s=    7198  per-thread=900/s
+parallel fdatasync, separate files       threads=16   aggregate fsync/s=   10571  per-thread=661/s

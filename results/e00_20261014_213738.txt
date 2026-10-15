@@ -1,0 +1,32 @@
+=== E00 baseline ===
+--- physics: cow ---
+[cow] fdatasync 4KB append                   n=2000    ops/s=     2072  p50=   447.5us p99=   781.4us max= 30239.7us
+[cow] fsync 4KB append                       n=2000    ops/s=     2090  p50=   461.4us p99=   716.1us max=  1355.6us
+[cow] fdatasync 4KB overwrite                n=2000    ops/s=     2068  p50=   462.2us p99=   749.5us max= 29056.3us
+--- physics: nocow ---
+[nocow] fdatasync 4KB append                 n=2000    ops/s=     2203  p50=   433.5us p99=   737.4us max=  1162.2us
+[nocow] fsync 4KB append                     n=2000    ops/s=     2201  p50=   433.5us p99=   702.2us max=  1177.6us
+[nocow] fdatasync 4KB overwrite              n=2000    ops/s=     2259  p50=   406.6us p99=   658.0us max= 39572.9us
+--- sqlite single thread: cow ---
+[cow] sqlite 1 row/txn WAL sync=FULL         n=2000    ops/s=     2018  p50=   471.9us p99=   995.2us max=  1587.0us
+[cow] sqlite 1 row/txn WAL sync=NORMAL       n=20000   ops/s=   162291  p50=     3.5us p99=    11.1us max=  2477.9us
+[cow] sqlite 1 row/txn WAL sync=OFF          n=200000  ops/s=   254684  p50=     3.6us p99=     9.0us max=   327.3us
+[cow] sqlite 1 row/txn MEMORY sync=OFF       n=200000  ops/s=   223211  p50=     4.3us p99=     7.3us max=   275.1us
+[cow] sqlite bulk insert 1000/txn WAL NORMAL rows=1000000 rows/s=1887116 (0.53s)
+[cow] sqlite point reads by PK, 1 thr        reads=2000000 reads/s=821940 (2.43s)
+[cow] sqlite point reads by PK, 8 thr        reads=4000000 reads/s=839418 (4.77s)
+--- sqlite single thread: nocow ---
+[nocow] sqlite 1 row/txn WAL sync=FULL       n=2000    ops/s=     1817  p50=   455.2us p99=  1334.2us max=  2693.9us
+[nocow] sqlite 1 row/txn WAL sync=NORMAL     n=20000   ops/s=   118587  p50=     3.4us p99=     9.3us max=  4790.2us
+[nocow] sqlite 1 row/txn WAL sync=OFF        n=200000  ops/s=   259786  p50=     3.5us p99=     8.7us max=   337.8us
+[nocow] sqlite 1 row/txn MEMORY sync=OFF     n=200000  ops/s=   220887  p50=     4.3us p99=     7.3us max=   265.8us
+[nocow] sqlite bulk insert 1000/txn WAL NORMAL rows=1000000 rows/s=1887842 (0.53s)
+[nocow] sqlite point reads by PK, 1 thr      reads=2000000 reads/s=820332 (2.44s)
+[nocow] sqlite point reads by PK, 8 thr      reads=4000000 reads/s=859038 (4.66s)
+--- sqlite concurrent writers (nocow) ---
+[nocow] sqlite 1 writer thr, 1 row/txn, sync=NORMAL txns=20000 txn/s=92124 p50=3.5us p99=9.3us (0.22s)
+[nocow] sqlite 2 writer thr, 1 row/txn, sync=NORMAL txns=20000 txn/s=88930 p50=4.1us p99=408.1us (0.22s)
+[nocow] sqlite 4 writer thr, 1 row/txn, sync=NORMAL txns=20000 txn/s=100657 p50=4.3us p99=597.2us (0.20s)
+[nocow] sqlite 8 writer thr, 1 row/txn, sync=NORMAL txns=20000 txn/s=76942 p50=4.2us p99=34.6us (0.26s)
+[nocow] sqlite 1 writer thr, 1 row/txn, sync=FULL txns=2000 txn/s=2140 p50=443.1us p99=855.1us (0.93s)
+[nocow] sqlite 4 writer thr, 1 row/txn, sync=FULL txns=2000 txn/s=1722 p50=442.8us p99=927.4us (1.16s)

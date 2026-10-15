@@ -1,0 +1,10 @@
+Q4 GROUP BY country                                        median     5.495 ms   E13: 5.44 ms, SQLite 109.9 ms   (check 20.0)
+J1 join + filter                                           median    18.524 ms   E15: 96.8 ms, SQLite 181 ms   (check 62263999.5)
+J2 join + GROUP BY                                         median   104.051 ms   E15: 122 ms, SQLite 3,594 ms   (check 1249803777.3)
+J3 comma join, filters both sides                          median    25.738 ms   E15: 27.5 ms, SQLite 454 ms   (check 770885.0)
+[sqlite] index build on 5M orders 2.99s; Q5 5.63 us; J4 323.5 us; J6 4.74 us
+J1 join + filter                                           median    18.274 ms   E15: 96.8 ms, SQLite 181 ms   (check 62263999.5)
+J2 join + GROUP BY                                         median    84.767 ms   E15: 122 ms, SQLite 3,594 ms   (check 1249803777.3)
+J3 comma join, filters both sides                          median    26.522 ms   E15: 27.5 ms, SQLite 454 ms   (check 770885.0)
+J4 100 users -> their orders, group by user (index join)      87.552 us/call   SQLite 323.5 us, E15 (no index) 24,459 us   (check 249871500.1)
+J6 one user -> its orders (PK + index join)                    1.468 us/call   SQLite 4.74 us   (check 249689366.3)

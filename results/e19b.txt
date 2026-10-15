@@ -1,0 +1,11 @@
+=== E19b: scan layers over 5M orders (stride = 16 B header + row) ===
+orders: row 67 B, stride 83 B, 1221 chunks
+L0 sum over Vec<i64> keys (8 B/row, the column floor)                      0.000 ms    0.00 ns/row   (check 2500377051557.0)
+L1 raw chunk walk: read key at stride, no header check                     8.697 ms    1.74 ns/row   (check 2500377051557.0)
+L2 raw chunk walk + version>0 check                                        9.415 ms    1.88 ns/row   (check 2500377051557.0)
+L3 Table::scan closure summing the key                                     8.924 ms    1.78 ns/row   (check 2500377051557.0)
+L4 Table::scan + bitmap probe + count/sum on hits (J1 by hand)            12.139 ms    2.43 ns/row   (check 62263999.5)
+L5 SQL: SELECT count(*), sum(amount) FROM orders                          21.422 ms    4.28 ns/row   (check 1249803777.3)
+L6 SQL: SELECT count(*) FROM orders WHERE status = 2                      13.656 ms    2.73 ns/row   (check 1250000.0)
+L7 SQL J1: join + filter on users (E18: 91 ms)                            93.097 ms   18.62 ns/row   (check 62263999.5)
+L8 SQL J2: join + GROUP BY country (E18: 118 ms)                         150.336 ms   30.07 ns/row   (check 20.0)

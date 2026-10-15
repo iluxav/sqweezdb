@@ -1,0 +1,12 @@
+=== E15 / H26: joins through SQL ===
+[sqlite] J1 join + filter on users side: count, sum                median    181.008 ms   (check 62263999.5)
+[sqlite] J2 join + GROUP BY users.country                          median   3594.292 ms   (check 1249803777.3)
+[sqlite] J3 comma join, filters on both sides: count               median    454.437 ms   (check 770885.0)
+[sqlite] J4 100 users -> their orders, group by user (index on orders.user_id)    312.21 us/call       3203 calls/s   (check 249347988.8)
+[sqlite] J5 one order with its user (point join)                        1.52 us/call     658733 calls/s   (check 50113768.2)
+[ours]   loaded 1M users + 5M orders through SQL in 3.7s (no index on orders.user_id: we have none yet)
+[ours]   J1 join + filter on users side: count, sum                median     96.784 ms   (check 62263999.5)
+[ours]   J2 join + GROUP BY users.country                          median    122.266 ms   (check 1249803777.3)
+[ours]   J3 comma join, filters on both sides: count               median     27.547 ms   (check 770885.0)
+[ours]   J4 100 users -> their orders, group by user (full scan of orders)  24459.12 us/call         41 calls/s   (check 2488340.9)
+[ours]   J5 one order with its user (point join)                        0.97 us/call    1035581 calls/s   (check 50109549.1)

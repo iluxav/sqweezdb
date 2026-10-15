@@ -1,0 +1,18 @@
+=== E10 / H17: snapshots ===
+    victim snapshot: 15136 rows, 1.9 MB, low_water 22689, 0.003s, deleted 0 old segment(s)
+    victim snapshot: 30998 rows, 4.0 MB, low_water 46472, 0.005s, deleted 1 old segment(s)
+[ours+snapshots] kill -9 after 2000ms: snapshot 30998 rows (low_water 46472), 2 log segment(s) 6.0 MB, replayed 19939 skipped 23759 | acked 66408 on 44284 ids | LOST: 0 | restart 0.016s (load 0.003s + replay 0.013s)
+    victim snapshot: 14785 rows, 1.9 MB, low_water 22150, 0.003s, deleted 0 old segment(s)
+    victim snapshot: 29935 rows, 3.8 MB, low_water 44864, 0.004s, deleted 1 old segment(s)
+    victim snapshot: 45979 rows, 5.9 MB, low_water 68956, 0.008s, deleted 1 old segment(s)
+    victim snapshot: 62021 rows, 7.9 MB, low_water 93004, 0.009s, deleted 1 old segment(s)
+    victim snapshot: 78087 rows, 10.0 MB, low_water 117069, 0.012s, deleted 1 old segment(s)
+[ours+snapshots] kill -9 after 3600ms: snapshot 78087 rows (low_water 117069), 2 log segment(s) 3.6 MB, replayed 2056 skipped 24050 | acked 119101 on 79412 ids | LOST: 0 | restart 0.013s (load 0.006s + replay 0.007s)
+--- restart rematch (E09: log-only replay of 3M records took 1.43s; SQLite ~1ms normally, 0.66s with a 4.3 GB WAL) ---
+snapshot of 2000000 rows: 256 MB in 0.218s, low_water 2999978, deleted 1 segment(s)
+restart A (snapshot 2000000 rows + 1M-record tail), 12 threads: 0.500s = load 0.102s + replay 1000000 records 0.399s (skipped 359)
+snapshot again: 0.210s, deleted 1 segment(s)
+restart B (snapshot 2000000 rows, empty tail), 12 threads: 0.097s = load 0.097s + replay 0 records 0.000s
+restart B, 1 thread: 0.507s = load 0.507s + replay 0.000s
+--- cost of snapshots to 64 durable writers (E07 without snapshots: ~58k txn/s) ---
+64 durable writers for 4.5s with a snapshot every 1s: 57673 txn/s; 4 snapshots, each 128 MB in 0.112s avg, deleted 4 old segments total

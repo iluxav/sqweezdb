@@ -1,0 +1,19 @@
+=== E01 read scaling diagnosis ===
+same file, autocommit per read                       thr=1  reads/s=    828841  per-read=1207ns
+same file, autocommit per read                       thr=2  reads/s=   1366029  per-read=1464ns
+same file, autocommit per read                       thr=4  reads/s=   1113172  per-read=3593ns
+same file, autocommit per read                       thr=8  reads/s=    838640  per-read=9539ns
+same file, autocommit per read                       thr=12 reads/s=    766076  per-read=15664ns
+same file, ONE long read txn per thread              thr=1  reads/s=   1419336  per-read=705ns
+same file, ONE long read txn per thread              thr=2  reads/s=   1918842  per-read=1042ns
+same file, ONE long read txn per thread              thr=4  reads/s=   1367207  per-read=2926ns
+same file, ONE long read txn per thread              thr=8  reads/s=   1020567  per-read=7839ns
+same file, ONE long read txn per thread              thr=12 reads/s=    927044  per-read=12944ns
+same file, mmap 1GB, long read txn                   thr=8  reads/s=  13629485  per-read=587ns
+same file, mmap 1GB, long read txn                   thr=12 reads/s=  17880703  per-read=671ns
+same file, mmap 1GB, autocommit                      thr=8  reads/s=   4428175  per-read=1807ns
+same file, mmap 1GB, autocommit                      thr=12 reads/s=   4256189  per-read=2819ns
+SEPARATE file per thread, autocommit                 thr=8  reads/s=    712009  per-read=11236ns
+SEPARATE file per thread, autocommit                 thr=12 reads/s=    884794  per-read=13562ns
+SEPARATE file per thread, long read txn              thr=8  reads/s=   1009498  per-read=7925ns
+SEPARATE file per thread, long read txn              thr=12 reads/s=    925893  per-read=12960ns

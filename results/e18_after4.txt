@@ -1,0 +1,5 @@
+[sqlite] index build on 5M orders 3.06s; Q5 5.77 us; J4 324.9 us; J6 4.72 us
+J1 join + filter                                           median    26.211 ms   E15: 96.8 ms, SQLite 181 ms   (check 62263999.5)
+J2 join + GROUP BY                                         median   113.439 ms   E15: 122 ms, SQLite 3,594 ms   (check 1249803777.3)
+J3 comma join, filters both sides                          median    33.562 ms   E15: 27.5 ms, SQLite 454 ms   (check 770885.0)
+J4 100 users -> their orders, group by user (index join)      92.592 us/call   SQLite 324.9 us, E15 (no index) 24,459 us   (check 249871500.1)

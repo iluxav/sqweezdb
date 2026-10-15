@@ -1,0 +1,17 @@
+=== E11 / H13: joins (1M users, 5M orders) ===
+[sqlite] build 2.3s, index on orders(user_id) 2.8s, file 464 MB
+[sqlite] Q5 orders of one user via index (~5 rows): count,sum      per-call=    5.39us  calls/s=   185582   (check 249415217.6)
+[sqlite] Q6 join 100 users -> ~500 orders, group by user           per-call=  309.95us  calls/s=     3226   (check 249871500.1)
+[sqlite] Q7 join 5M orders x users WHERE country=7: count,sum      median=   180.198ms   (check 62263999.5)
+[sqlite] Q10 join 5M orders x users GROUP BY country: sum(amount)  median=  3554.666ms   (check 1249803777.3)
+[ours] build CSR index on orders(user_id): 0.028s (24 MB)
+[ours] build sorted-pairs index on orders(user_id): 0.102s (80 MB)
+[ours] Q5 orders of one user via CSR index: count,sum              per-call=    0.06us  calls/s= 16160227   (check 249415217.6)
+[ours] Q5 orders of one user via sorted-pairs index (binary search) per-call=    0.47us  calls/s=  2132735   (check 249679445.3)
+[ours] Q6 join 100 users -> ~500 orders via CSR, group by user     per-call=    2.40us  calls/s=   416094   (check 250057921.0)
+[ours] Q7 bitmap semi-join (filter users -> 128KB bitmap -> scan 5M orders), 1 thread median=     9.240ms   (check 62263999.5)
+[ours] Q7 bitmap semi-join, 12 threads                             median=     7.614ms   (check 62263999.5)
+[ours] Q7 hash-set semi-join (50k keys open addressing), 1 thread  median=    23.391ms   (check 62263999.5)
+[ours] Q7 direct probe users[user_id].country (random access), 1 thread median=    30.793ms   (check 62263999.5)
+[ours] Q10 join GROUP BY country via 1MB country projection, 1 thread median=    10.040ms   (check 1249803777.3)
+[ours] Q10 join GROUP BY country via projection, 12 threads        median=     7.732ms   (check 1249803777.3)

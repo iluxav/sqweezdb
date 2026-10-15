@@ -1,0 +1,12 @@
+=== E12 / H20: memory footprint, 2M rows of 120 B (240 MB of raw row data) ===
+sqlite file on disk: 281 MB (with the unique index on name)
+ours snapshot file on disk: 256 MB
+sqlite default 2MB cache after scan+100k lookups (check 1233321 50225356): rss=7 MB peak=7 MB
+sqlite tuned 256MB cache + mmap after scan+100k lookups (check 1233321 50225356): rss=273 MB peak=273 MB
+ours empty engine: rss=3 MB peak=3 MB
+ours 2M rows loaded, after scan+100k lookups (check 1233321 50225356): rss=470 MB peak=470 MB
+ours, where it goes:
+  arena Vec<Slot> 2M x 136 B: 259 MB
+  PK index BTreeMap<u64,u32> 2M: 29 MB
+  secondary index HashMap<[u8;32],u32> 2M: 148 MB
+ours after restart from snapshot of 2000000 rows (check 1233321): rss=470 MB peak=714 MB

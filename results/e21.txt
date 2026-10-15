@@ -1,0 +1,76 @@
+=== E21: a second program reaching the database ===
+[ours, in the owner process] point read (check 99825557805)                   0.43 us/op    2343273 ops/s
+[ours, 2nd process] point read over the socket (check 99825557805)            3.15 us/op     317578 ops/s
+[ours, 2nd process] point reads batched 100 per round trip (check 99942182277)      0.56 us/op    1779505 ops/s
+[ours, 2nd process] insert over the socket, not durable                       3.98 us/op     251155 ops/s
+[ours, 2nd process] count(*) now Int(1050000)
+[ours, 2nd process] point reads, 8 connections in the 2nd process             0.69 us/op    1448407 ops/s
+[ours, 2nd process] after LOGIN alice (policy country = 7): count(*) = Int(52500)
+[ours, 2nd process] alice INSERT with country 8: Some("permission denied: row violates a policy on t")
+[ours, 2nd process, durable owner] durable inserts (fsync), 1 connections in the 2nd process    450.91 us/op       2218 ops/s
+[ours, 2nd process, durable owner] durable inserts (fsync), 8 connections in the 2nd process    114.48 us/op       8735 ops/s
+[ours, 2nd process, durable owner] durable inserts (fsync), 64 connections in the 2nd process     16.34 us/op      61197 ops/s
+--- SQLite: the second process opens the same file ---
+[sqlite, 2nd process] point read on the shared file (check 99825557805)       1.02 us/op     978379 ops/s
+[sqlite, 2nd process] insert, sync=NORMAL (not durable)                      18.49 us/op      54086 ops/s
+[sqlite, 2nd process] point reads, 8 connections in the 2nd process           0.19 us/op    5244988 ops/s
+[sqlite, 2nd process] durable inserts (FULL), 1 connections in the 2nd process    455.99 us/op       2193 ops/s
+[sqlite, 2nd process] durable inserts (FULL), 8 connections in the 2nd process    490.54 us/op       2039 ops/s
+
+thread '<unnamed>' (3821948) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (3821949) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821982) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821973) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821997) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821942) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821945) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821947) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821969) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821961) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821940) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821960) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821975) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821985) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821970) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821995) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821989) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread '<unnamed>' (3821968) panicked at src/bin/e21_second_process.rs:62:502:
+called `Result::unwrap()` on an `Err` value: SqliteFailure(Error { code: DatabaseBusy, extended_code: 5 }, Some("database is locked"))
+
+thread 'main' (3821878) panicked at src/bin/e21_second_process.rs:63:66:
+called `Result::unwrap()` on an `Err` value: Any { .. }
