@@ -1,4 +1,22 @@
-target/
-data/
-rsults/
+# Build output
+/target/
+bindings/*/target/
+bindings/node/node_modules/
+
+# Compiled artifacts: rebuilt with `cargo build --release` in the crate that owns them
+*.so
+*.node
+bindings/go/bench/bench
+bindings/go/sse/sse
+
+# Experiment working data (databases, buckets, sockets) and downloaded third-party tools (see README)
+/data/
+/tools/
+
+# Measurements ledger (kept out of the repo by the owner's choice; raw outputs in results/ are tracked)
 RESULTS.md
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~
