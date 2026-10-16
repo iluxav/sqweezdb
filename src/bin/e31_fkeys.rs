@@ -27,7 +27,7 @@ fn sqlite_build(path: &str, fk_on: bool) -> Connection {
     let tx = c.unchecked_transaction().unwrap(); { let mut st = tx.prepare("INSERT INTO users VALUES (?,?)").unwrap(); for id in 1..=NU { st.execute(params![id, format!("u{id}")]).unwrap(); } } tx.commit().unwrap(); c
 }
 fn ours_build(dir: &PathBuf) -> Sql {
-    let sql = Sql::create(dir, false); let mut s = Session::default();
+    let sql = Sql::recreate(dir, false); let mut s = Session::default();
     for q in ["CREATE TABLE users(id INTEGER PRIMARY KEY, name VARCHAR(32))", "CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE CASCADE, amount DOUBLE)", "CREATE TABLE invoices(id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id), total DOUBLE)", "CREATE TABLE payments(id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE SET NULL, amt DOUBLE)"] { sql.exec_s(&mut s, q, &[]).unwrap(); }
     let ins = sql.prepare("INSERT INTO users VALUES (?,?)").unwrap(); for id in 1..=NU { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Text(format!("u{id}"))]).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } }
     sql

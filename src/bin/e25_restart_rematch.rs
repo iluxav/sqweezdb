@@ -74,7 +74,7 @@ fn main() {
             println!("mapped {} replayed {} low_water {} segments {}", rs.snap_rows, rs.replayed, rs.low_water, rs.segments);
             for id in [1i64, 2, 777_777, 1_000_000, N, N + 1] { println!("  {} -> {:?} | {}", id, sql.exec_s(&mut s, "SELECT score FROM t WHERE id = ?", &[Value::Int(id)]).unwrap(), t.debug_lookup(id)); }
             println!("  count {:?}", sql.exec_s(&mut s, "SELECT count(*) FROM t", &[]).unwrap()); return; }
-        Some("build") => { let dir = PathBuf::from(format!("{DIR}/snap")); let sql = Sql::create(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, CREATE, &[]).unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
+        Some("build") => { let dir = PathBuf::from(format!("{DIR}/snap")); let sql = Sql::recreate(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, CREATE, &[]).unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
             for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &row(id, &mut rng)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } }
             let st = sql.snapshot(); println!("built: {} rows, {:.0} MB", st.rows, st.bytes as f64 / 1e6); return; }
         _ => {}
@@ -83,7 +83,7 @@ fn main() {
     for suf in ["", "-wal", "-shm"] { fs::remove_file(format!("{DB}{suf}")).ok(); }
     { let c = Connection::open(DB).unwrap(); c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap(); c.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, score REAL NOT NULL, country INTEGER NOT NULL, age INTEGER NOT NULL, name TEXT NOT NULL, payload BLOB NOT NULL); CREATE UNIQUE INDEX t_name ON t(name);").unwrap();
       let mut rng = Rng(7); let tx = c.unchecked_transaction().unwrap(); { let mut st = tx.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); for id in 1..=N { let r = row(id, &mut rng); st.execute(params![id, match r[1] { Value::Float(f) => f, _ => 0.0 }, id % 20, 18 + id % 60, format!("u{id}@example.com"), &[7u8; 64][..]]).unwrap(); } } tx.commit().unwrap(); c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap(); }
-    { let dir = PathBuf::from(format!("{DIR}/snap")); let sql = Sql::create(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, CREATE, &[]).unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
+    { let dir = PathBuf::from(format!("{DIR}/snap")); let sql = Sql::recreate(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, CREATE, &[]).unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
       for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &row(id, &mut rng)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } }
       let st = sql.snapshot(); println!("snapshot: {} rows, {:.0} MB, {:.3}s (sqlite file {:.0} MB)", st.rows, st.bytes as f64 / 1e6, st.secs, fs::metadata(DB).unwrap().len() as f64 / 1e6); drop(ins); drop(sql); }
     println!("-- warm page cache --"); println!("{}", child(&["sqlite", "warm"])); println!("{}", child(&["ours", "warm"]));

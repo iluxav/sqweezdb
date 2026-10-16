@@ -31,7 +31,7 @@ fn main() {
     println!("=== E19a: NULL and DELETE semantics vs SQLite ===");
     let dir = PathBuf::from("data/nocow/e19dir");
     let c = Connection::open_in_memory().unwrap();
-    let mut b = Both { sql: Sql::create(&dir, false), sess: Session::default(), c, pass: 0, fail: 0 };
+    let mut b = Both { sql: Sql::recreate(&dir, false), sess: Session::default(), c, pass: 0, fail: 0 };
     let create = "CREATE TABLE t(id INTEGER PRIMARY KEY, a INT, b DOUBLE, s VARCHAR(8), n INT NOT NULL)";
     b.sql.exec_s(&mut b.sess, create, &[]).unwrap(); b.c.execute_batch(create).unwrap();
     let ins = "INSERT INTO t VALUES (?,?,?,?,?)";
@@ -75,7 +75,7 @@ fn main() {
     println!("semantic checks: {pass} ok, {fail} different");
 
     println!("--- delete throughput (1M rows, 200k deletes by pk; one 100k-row DELETE statement) ---");
-    let dir = PathBuf::from("data/nocow/e19perf"); let sql = Sql::create(&dir, false); let mut sess = Session::default();
+    let dir = PathBuf::from("data/nocow/e19perf"); let sql = Sql::recreate(&dir, false); let mut sess = Session::default();
     sql.exec_s(&mut sess, "CREATE TABLE d(id INTEGER PRIMARY KEY, v INT, p BLOB(64))", &[]).unwrap();
     let ins = sql.prepare("INSERT INTO d VALUES (?,?,?)").unwrap();
     for id in 1..=1_000_000i64 { if id % 1000 == 1 { sql.exec_s(&mut sess, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut sess, &ins, &[Value::Int(id), Value::Int(id % 10), Value::Bytes(vec![1; 64])]).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut sess, "COMMIT", &[]).unwrap(); } }

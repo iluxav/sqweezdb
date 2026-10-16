@@ -41,7 +41,7 @@ in your process and a directory on disk. No server to run, unless you want one.
 ```js
 import { open } from 'sqweezdb'
 
-const db = open('./data')   // creates or reopens; one engine per path per process
+const db = open('./data')   // creates or reopens; one engine per path per process; see Configuration for options
 
 db.exec(`CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT NOT NULL,
                              amount DOUBLE, placed_at TIMESTAMP)`)
@@ -120,10 +120,11 @@ binding uses cgo and links `libsqweezdb.so` from `target/release`.
 ### Rust
 
 ```rust
+use sqweezdb::config::Config;
 use sqweezdb::sql::{Session, Sql};
 use sqweezdb::table::Value;
 
-let sql = Sql::create(std::path::Path::new("./data"), false);   // Sql::open(path, durable, threads) to reopen
+let sql = Sql::open_with(std::path::Path::new("./data"), Config::default())?;   // creates or reopens, starts the configured services
 let mut s = Session::default();
 sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(32))", &[])?;
 let ins = sql.prepare("INSERT INTO t VALUES (?,?)")?;
@@ -131,17 +132,88 @@ sql.execute_s(&mut s, &ins, &[Value::Int(1), Value::Text("alice".into())])?;
 let rows = sql.exec_s(&mut s, "SELECT * FROM t WHERE id = ?", &[Value::Int(1)])?;
 ```
 
-Other processes reach the owning process through `sqweezdb::net::Server` (a Unix socket, a
-shared-memory ring for 0.6 µs reads, or TCP with a shared token) and `sqweezdb::net::Client`.
-Backup to a bucket is `sqweezdb::cloud::{CloudConfig, start_uploader, download, start_puller}`;
-followers are `Sql::follow`; many databases in one process are `sqweezdb::tenants::TenantHost`.
-These are Rust-only today.
+`Config` is the same set of keys the bindings take (below); `Config::load(dir, json)` merges a
+`sqweezdb.toml` with options. Other processes reach the owner through `sqweezdb::net::Client` (a
+Unix socket, a shared-memory ring for 0.6 µs reads, or TCP with a shared token). Many databases in
+one process are `sqweezdb::tenants::TenantHost`, Rust-only today. `Sql::recreate` wipes a directory
+first and exists for tests and experiments.
 
 ### C
 
 `libsqweezdb.so` exports a small C ABI (`sqweezdb_open`, `sqweezdb_prepare`, `sqweezdb_exec`,
 `sqweezdb_rows_all`, `sqweezdb_subscribe`, ...). The Go binding in `bindings/go/sqweezdb/sqweezdb.go`
 doubles as its reference; the declarations are in its cgo preamble.
+
+## Configuration
+
+Every binding opens with the same keys. Options passed from code win over a `sqweezdb.toml` in the
+database directory, which wins over the defaults. Strings in the file may reference environment
+variables as `${NAME}`; an unset variable is an error, and nothing is read from the environment
+unless the file asks for it. Durations are `'5ms'`, `'1s'`, `'2m'`, `'1h'`, `'7d'` or milliseconds;
+sizes are `'256MB'`, `'1GB'` or bytes; `0` turns a policy off. An unknown key is an error, so typos
+do not silently disable anything.
+
+```js
+const db = open('./data', {
+  durable: false,            // false: writes return when visible, `durable` promises cover the fsync
+                             // true: every commit waits for its fsync (concurrent writers share one)
+                             // 'cloud': every commit waits until the bucket has it
+  create: true,              // create the directory if it holds no database; never wipes one
+
+  backup: {                  // continuous backup to any S3-compatible bucket
+    endpoint: 'https://s3.eu-central-1.amazonaws.com', bucket: 'acme-prod', prefix: 'orders/',
+    region: 'eu-central-1', accessKey: process.env.S3_KEY, secretKey: process.env.S3_SECRET,
+    passphrase: process.env.DB_PASSPHRASE,   // AES-256-GCM; omit for plaintext (still zstd-compressed)
+    interval: '1s', compress: true, compactAfter: '1m', compactEvery: '30s',
+    bootstrap: true,         // empty directory + non-empty bucket: restore the latest state, then open
+  },
+
+  follow: { dir: '/srv/primary' },          // or { bucket: {...} }: open as a read-only replica
+  snapshot: { logBytes: '64MB', idleAfter: '30s' },   // when the engine snapshots on its own (defaults)
+  listen: { socket: '/run/sqweezdb/orders.sock', tcp: '0.0.0.0:7781', token: process.env.DB_TOKEN },
+  live: { debounce: '5ms', queue: 65536 },  // live-query debounce, per-subscriber queue before overflow
+  log: { threadsIdleAfter: '60s' },         // log threads leave when idle and return on the next write
+})
+```
+
+The same document as a file, for operators:
+
+```toml
+# ./data/sqweezdb.toml
+durable = true
+
+[backup]
+endpoint  = "https://s3.eu-central-1.amazonaws.com"
+bucket    = "acme-prod"
+prefix    = "orders/"
+accessKey = "${S3_KEY}"
+secretKey = "${S3_SECRET}"
+passphrase = "${DB_PASSPHRASE}"
+bootstrap = true
+
+[listen]
+tcp   = "0.0.0.0:7781"
+token = "${DB_TOKEN}"
+```
+
+Python takes the keys as keyword arguments (`sqweezdb.Database(path, durable=False, backup={...})`),
+Go as `sqweezdb.OpenWith(path, sqweezdb.Options{...})`, C as a JSON string to `sqweezdb_open_with`.
+
+What the policies do, measured in E42 on the lab machine:
+
+- **Snapshots** write the table image the restart maps. The policy fires once the log since the
+  last snapshot exceeds the larger of `logBytes` and that snapshot's own size, so a large table is
+  not rewritten for every few megabytes of log, and after `idleAfter` without writes. Log replays at
+  about 350 MB/s here, so the 64 MB floor bounds a restart at roughly 0.2 s plus one snapshot's
+  worth; a quiet database restarts in a millisecond. The policy firing during a 1M-row insert burst
+  cost a worst stall of 0.4 ms, and the idle snapshot shrank the log from 77 MB to nothing.
+- **Backup** runs beside the writer: with uploads every half second, inserts cost 0.88 µs with or
+  without it, and the bucket was 0.4 s behind the last write.
+- **Bootstrap** of a new node from a 1M-row bucket (10.7 MB, encrypted) took 0.28 s from `open()` to
+  the first answered query; the node then continued as the primary on the same prefix. An empty bucket
+  opens an empty database.
+- **Follow** turns a directory into a read-only replica of a primary on the same host or of a bucket;
+  1,000 new rows were visible on the follower 38 ms after the primary committed them (20 ms poll).
 
 ## SQL
 
@@ -175,11 +247,11 @@ why restart takes a millisecond whatever the size. Everything that reads the log
 point-in-time restore, the cloud uploader and the change feed behind subscriptions, is the same
 mechanism applied to the same bytes.
 
-**Durability has two modes.** Opened with `durable = false`, a write returns when it is visible and
+**Durability has three modes.** Opened with `durable = false`, a write returns when it is visible and
 the fsync follows within about half a millisecond; the Node binding exposes that moment as the
 `durable` promise, and a crash can lose only the last few hundred microseconds of acknowledged
 writes. Opened with `durable = true`, every commit waits for its fsync, and many concurrent writers
-still share one. A third mode waits for the record to be in the bucket before acknowledging.
+still share one. With `durable = 'cloud'`, a commit is acknowledged once its record is in the bucket.
 
 Other processes do not open the files. They connect to the owner over a Unix socket, upgrade to a
 shared-memory ring for 0.6 µs reads, or connect over TCP with a shared token. Network access is one
@@ -230,6 +302,7 @@ The Node benchmark against better-sqlite3 needs `npm install --no-save better-sq
   change feed · `src/live.rs` subscriptions and live queries · `src/cloud.rs` S3 backup, compression,
   encryption · `src/tenants.rs` many databases per process · `src/net.rs` socket, ring and TCP
   server · `src/capi.rs` C ABI.
+- `src/config.rs` the configuration keys, file loading and validation.
 - `src/bin/e*.rs` the experiments, one per question asked during development; their raw outputs are
   in `results/`.
 - `bindings/node`, `bindings/python`, `bindings/go` the language bindings.

@@ -19,7 +19,7 @@ const DIR: &str = "data/nocow/e37dir"; const SOCK: &str = "data/nocow/e37.sock";
 fn now_us(t0: &Instant) -> i64 { t0.elapsed().as_micros() as i64 }
 fn pct(v: &mut Vec<f64>, p: f64) -> f64 { if v.is_empty() { return 0.0; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 - 1.0) * p) as usize] }
 fn build() -> Arc<Sql> {
-    let sql = Arc::new(Sql::create(&PathBuf::from(DIR), false)); let mut s = Session::default();
+    let sql = Arc::new(Sql::recreate(&PathBuf::from(DIR), false)); let mut s = Session::default();
     for q in ["CREATE TABLE users(id INTEGER PRIMARY KEY, name VARCHAR(32))", "CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT, country INT, amount DOUBLE, ts INT)", "CREATE INDEX orders_user ON orders(user_id)",
               "CREATE ROLE tenant", "GRANT SELECT ON orders TO tenant", "CREATE POLICY own_orders ON orders FOR SELECT TO tenant USING (user_id = SESSION.uid)", "CREATE USER u7 IN ROLE tenant WITH uid = 7"] { sql.exec_s(&mut s, q, &[]).unwrap(); }
     let ins = sql.prepare("INSERT INTO users VALUES (?,?)").unwrap(); for id in 1..=NU { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Text(format!("u{id}"))]).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } }

@@ -86,16 +86,16 @@ fn pack(cols: &Cols, rows: &[Vec<Value>]) -> Vec<u8> {
 #[napi] pub struct Sub { stop: Arc<AtomicBool>, tsfn: Option<ThreadsafeFunction<Payload, ErrorStrategy::Fatal>>, cols: Arc<Cols>, initial: Vec<Vec<Value>> }
 enum Payload { Change(Arc<sql::Change>), Live { rows: Vec<Vec<Value>>, added: Vec<Vec<Value>>, removed: Vec<Vec<Value>> }, Overflow(u64) }
 
-/// Open (or create) the database in `path`. Durable=false returns from writes when they are visible; `waitDurable` covers the fsync.
+/// Open (or create) the database in `path` with a JSON options document (the engine's configuration keys).
+/// A second open of the same path in this process joins the first; its options are ignored.
 #[napi]
-pub fn open(path: String, durable: Option<bool>) -> Result<Db> {
+pub fn open(path: String, options: Option<String>) -> Result<Db> {
     let p = std::path::absolute(&path).map_err(|e| err_code("ERROR", &e.to_string()))?;
-    let d = durable.unwrap_or(false);
     let mut g = OPEN.lock().unwrap(); let reg = g.get_or_insert_with(HashMap::new);
-    if let Some(sql) = reg.get(&p).and_then(|w| w.upgrade()) { return Ok(Db { sql: Mutex::new(Some(sql)), durable: d }); }
-    let existing = p.join("snap").exists() || !sqweezdb::table::GLog::list_segments(&p).is_empty();
-    let sql = if existing { Sql::open(&p, d, 4).map_err(err)?.0 } else { Sql::create(&p, d) };
-    let sql = Arc::new(sql); reg.insert(p, Arc::downgrade(&sql));
+    if let Some(sql) = reg.get(&p).and_then(|w| w.upgrade()) { let d = sql.cfg.durable != sqweezdb::config::Durability::Visible; return Ok(Db { sql: Mutex::new(Some(sql)), durable: d }); }
+    let cfg = sqweezdb::config::Config::load(&p, options.as_deref()).map_err(err)?;
+    let d = cfg.durable != sqweezdb::config::Durability::Visible;
+    let sql = Sql::open_with(&p, cfg).map_err(err)?; reg.insert(p, Arc::downgrade(&sql));
     Ok(Db { sql: Mutex::new(Some(sql)), durable: d })
 }
 
@@ -107,7 +107,7 @@ pub fn open(path: String, durable: Option<bool>) -> Result<Db> {
         Ok(Stmt { p, cols, kind })
     }
     #[napi] pub fn session(&self) -> Result<Sess> { Ok(Sess { sql: self.sql()?, s: Arc::new(Mutex::new(Session::default())) }) }
-    #[napi] pub fn close(&self) { self.sql.lock().unwrap().take(); }
+    #[napi] pub fn close(&self) { if let Some(s) = self.sql.lock().unwrap().take() { s.close(); } }
     #[napi] pub fn is_durable(&self) -> bool { self.durable }
     #[napi] pub fn rows(&self) -> Result<f64> { Ok(self.sql()?.snapshot().rows as f64) }
     /// Resolves once commit `seq` is on disk.

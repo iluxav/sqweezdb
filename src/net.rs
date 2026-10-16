@@ -22,7 +22,7 @@ impl Ring {
     fn open(path: &Path, create: bool) -> std::io::Result<Ring> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let mut o = std::fs::OpenOptions::new(); o.read(true).write(true).create(create);
-        if !create { o.custom_flags(0o400000); }  // O_NOFOLLOW: the server never follows a symlink a client planted
+        if !create { o.custom_flags(libc::O_NOFOLLOW); }  // the server never follows a symlink a client planted
         let f = o.open(path)?;
         if create { f.set_len(SHM_SIZE as u64)?; }
         else { let m = f.metadata()?; if !m.is_file() || m.len() != SHM_SIZE as u64 || m.nlink() != 1 { return Err(std::io::Error::other("ring file must be a plain regular file of the ring size")); } }
@@ -112,11 +112,11 @@ impl Server {
     /// Accept connections forever on `path`; one thread and one session per connection.
     pub fn start(sql: Arc<Sql>, path: &Path) -> std::io::Result<std::thread::JoinHandle<()>> {
         std::fs::remove_file(path).ok();
-        let listener = UnixListener::bind(path)?;
+        let listener = UnixListener::bind(path)?; let weak = Arc::downgrade(&sql); drop(sql);
         Ok(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
-                let sql = sql.clone();
+                let Some(sql) = weak.upgrade() else { return };   // the database is gone: stop accepting
                 std::thread::spawn(move || { let _ = Self::serve(sql, stream, None, false); });
             }
         }))
@@ -126,12 +126,13 @@ impl Server {
     /// network or a TLS tunnel until H55). Remote clients cannot use shared-memory rings.
     pub fn start_tcp(sql: Arc<Sql>, addr: &str, token: &str) -> std::io::Result<std::thread::JoinHandle<()>> {
         if token.is_empty() { return Err(std::io::Error::other("a TCP listener needs a non-empty token")); }
-        let listener = TcpListener::bind(addr)?; let token: Arc<str> = Arc::from(token);
+        let listener = TcpListener::bind(addr)?; let token: Arc<str> = Arc::from(token); let weak = Arc::downgrade(&sql); drop(sql);
         Ok(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
                 stream.set_nodelay(true).ok();
-                let (sql, token) = (sql.clone(), token.clone());
+                let Some(sql) = weak.upgrade() else { return };
+                let token = token.clone();
                 std::thread::spawn(move || { let _ = Self::serve(sql, stream, Some(token), true); });
             }
         }))
@@ -241,3 +242,21 @@ impl Client {
 }
 
 impl Drop for Client { fn drop(&mut self) { if let Some((ring, _, path)) = &self.ring { ring.closed().store(1, Ordering::Relaxed); std::fs::remove_file(path).ok(); } } }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ring_refuses_symlinks_and_odd_files() {
+        let dir = std::env::temp_dir().join(format!("sqweezdb-ring-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real"); std::fs::File::create(&real).unwrap().set_len(SHM_SIZE as u64).unwrap();
+        let link = dir.join("link"); std::os::unix::fs::symlink(&real, &link).unwrap();
+        let small = dir.join("small"); std::fs::write(&small, b"x").unwrap();
+        assert!(Ring::open(&real, false).is_ok(), "a plain file of the ring size is accepted");
+        assert!(Ring::open(&link, false).is_err(), "a symlink to it is refused");
+        assert!(Ring::open(&small, false).is_err(), "a file of another size is refused");
+        assert!(Ring::open(&dir, false).is_err(), "a directory is refused");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

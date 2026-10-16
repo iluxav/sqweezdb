@@ -1,0 +1,19 @@
+=== E42: configuration at open (restart vs log tail, bootstrap from the bucket, cost of backup and snapshot policy, follower) ===
+(a) 1M rows snapshotted; then the log grows and the database restarts with that tail to replay (4 recovery threads):
+    tail     0.0 MB (0 rows added) -> restart 0 ms (0 MB/s of log replayed), 1000000 rows
+    tail    70.0 MB (500000 rows added) -> restart 195 ms (359 MB/s of log replayed), 1500000 rows
+    tail   343.0 MB (1950000 rows added) -> restart 948 ms (362 MB/s of log replayed), 3450000 rows
+    tail   882.1 MB (3850000 rows added) -> restart 2521 ms (350 MB/s of log replayed), 7300000 rows
+(b) primary: 1M rows backed up (2 objects, 10.7 MB in the bucket, encrypted) in 0.4 s; primary stops
+sqweezdb: bootstrapped data/nocow/e42/b-newnode from the bucket (1 log objects, 10.7 MB)
+    new node with an empty directory and `backup.bootstrap = true`: open -> first query in 0.28 s, sees 1000000 rows (expect 1000000)
+    the new node is now the primary: its first write reached the bucket 0.65 s later, resuming the same prefix
+    bootstrap against an empty bucket: opens fresh in 0.00 s, table t absent: true
+(c) one thread, autocommit inserts, returning when visible:
+    no backup, no snapshot policy              0.88 us/insert, p99.9 5 us, worst 187 us, 0 snapshots by policy
+    backup configured (uploads every 0.5 s)    0.88 us/insert, p99.9 4 us, worst 49 us, 0 snapshots by policy
+    (the bucket caught up 0.40 s after the last insert: 1 objects, 4.0 MB)
+    snapshot policy (floor 32 MB), 1M inserts  0.89 us/insert, p99.9 4 us, worst 383 us, 2 snapshots by policy
+    after 2.6 s of silence: idle snapshot taken: true, log tail 77.1 MB -> 0.0 MB
+    restart after the policy ran: 0 ms for 1000000 rows
+(d) follower opened with `follow.dir`: caught up, 1001000 rows on both sides, 1000 new rows visible 38 ms after the last commit

@@ -121,7 +121,7 @@ func main() {
 			defer wg.Done()
 			for i := 0; i < 100_000; i++ {
 				var sc float64
-				sget.QueryRow(int64((i*7919 + g*1234567) % N + 1)).Scan(&sc)
+				sget.QueryRow(int64((i*7919+g*1234567)%N + 1)).Scan(&sc)
 			}
 		}(g)
 	}

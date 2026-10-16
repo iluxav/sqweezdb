@@ -23,7 +23,7 @@ fn ou(sql: &Sql, s: &mut Session, stmt: &str, param: &Option<String>) -> Result<
 fn outcome(r: &Result<Vec<Vec<String>>, String>) -> String { match r { Ok(rows) if rows.is_empty() => "ok".into(), Ok(rows) => format!("ok: {}", rows.iter().take(3).map(|r| r.join("|")).collect::<Vec<_>>().join(" ; ")), Err(e) => format!("error: {}", e.chars().take(90).collect::<String>()) } }
 
 fn main() {
-    let c = Connection::open_in_memory().unwrap(); let dir = PathBuf::from("data/nocow/e29"); let sql = Sql::create(&dir, false); let mut s = Session::default();
+    let c = Connection::open_in_memory().unwrap(); let dir = PathBuf::from("data/nocow/e29"); let sql = Sql::recreate(&dir, false); let mut s = Session::default();
     let long = "x".repeat(2000); let nul = "a\0b".to_string();
     let seed = ["CREATE TABLE q(id INTEGER PRIMARY KEY, score DOUBLE, country INT, name VARCHAR(32))", "INSERT INTO q VALUES (1, 10.5, 1, 'ann')", "INSERT INTO q VALUES (2, 99.0, 1, 'bob')", "INSERT INTO q VALUES (3, 50.0, 2, 'cid')"];
     for st in seed { sq(&c, st, &None).unwrap(); ou(&sql, &mut s, st, &None).unwrap(); }

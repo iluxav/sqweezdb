@@ -7,7 +7,7 @@ package sqweezdb
 #include <stddef.h>
 typedef struct Db Db; typedef struct Stmt Stmt; typedef struct Sess Sess; typedef struct Rows Rows;
 typedef struct { int tag; long long i; double f; const unsigned char* ptr; size_t len; } CValue;
-Db* sqweezdb_open(const char* path, int durable); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
+Db* sqweezdb_open(const char* path, int durable); Db* sqweezdb_open_with(const char* path, const char* json); const char* sqweezdb_open_error(); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
 Sess* sqweezdb_session(Db*); void sqweezdb_session_free(Sess*); int sqweezdb_login(Db*, Sess*, const char*);
 Stmt* sqweezdb_prepare(Db*, const char*); void sqweezdb_finalize(Stmt*);
 Rows* sqweezdb_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* sqweezdb_exec_text(Db*, Sess*, const char*, const CValue*, int);
@@ -17,6 +17,7 @@ typedef struct Sub Sub; Sub* sqweezdb_subscribe(Db*, Sess*, const char*, const C
 */
 import "C"
 import (
+	"encoding/json"
 	"errors"
 	"runtime"
 	"unsafe"
@@ -29,16 +30,71 @@ type Session struct {
 	p  *C.Sess
 }
 
-func Open(path string, durable bool) (*DB, error) {
-	cp := C.CString(path)
-	defer C.free(unsafe.Pointer(cp))
-	d := 0
-	if durable {
-		d = 1
+// Options mirror the engine's configuration keys (see src/config.rs). Durations are strings like "500ms", "1s", "2m";
+// sizes like "256MB". Zero values are omitted, so an empty Options means the defaults.
+type Options struct {
+	Durable  any       `json:"durable,omitempty"` // false, true, or "cloud"
+	Create   *bool     `json:"create,omitempty"`
+	Backup   *Backup   `json:"backup,omitempty"`
+	Follow   *Follow   `json:"follow,omitempty"`
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	Listen   *Listen   `json:"listen,omitempty"`
+	Live     *Live     `json:"live,omitempty"`
+	Log      *Log      `json:"log,omitempty"`
+}
+type Backup struct {
+	Endpoint     string `json:"endpoint,omitempty"`
+	Bucket       string `json:"bucket,omitempty"`
+	Prefix       string `json:"prefix,omitempty"`
+	Region       string `json:"region,omitempty"`
+	AccessKey    string `json:"accessKey,omitempty"`
+	SecretKey    string `json:"secretKey,omitempty"`
+	Passphrase   string `json:"passphrase,omitempty"`
+	Interval     string `json:"interval,omitempty"`
+	Compress     *bool  `json:"compress,omitempty"`
+	CompactAfter string `json:"compactAfter,omitempty"`
+	CompactEvery string `json:"compactEvery,omitempty"`
+	Bootstrap    bool   `json:"bootstrap,omitempty"`
+}
+type Follow struct {
+	Dir    string  `json:"dir,omitempty"`
+	Bucket *Backup `json:"bucket,omitempty"`
+	Poll   string  `json:"poll,omitempty"`
+}
+type Snapshot struct {
+	LogBytes  any `json:"logBytes,omitempty"`  // "256MB" or bytes; 0 disables
+	IdleAfter any `json:"idleAfter,omitempty"` // "30s" or milliseconds; 0 disables
+}
+type Listen struct {
+	Socket string `json:"socket,omitempty"`
+	TCP    string `json:"tcp,omitempty"`
+	Token  string `json:"token,omitempty"`
+}
+type Live struct {
+	Debounce string `json:"debounce,omitempty"`
+	Queue    int    `json:"queue,omitempty"`
+}
+type Log struct {
+	ThreadsIdleAfter string `json:"threadsIdleAfter,omitempty"`
+}
+
+// Open opens or creates the database directory; durable waits for the disk on every commit.
+func Open(path string, durable bool) (*DB, error) { return OpenWith(path, Options{Durable: durable}) }
+
+// OpenWith opens or creates the database directory with the given options. A sqweezdb.toml in the directory is read
+// first; the options win. An existing directory is never wiped.
+func OpenWith(path string, opts Options) (*DB, error) {
+	js, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
 	}
-	p := C.sqweezdb_open(cp, C.int(d))
+	cpath := C.CString(path)
+	cjson := C.CString(string(js))
+	defer C.free(unsafe.Pointer(cpath))
+	defer C.free(unsafe.Pointer(cjson))
+	p := C.sqweezdb_open_with(cpath, cjson)
 	if p == nil {
-		return nil, errors.New("sqweezdb: open failed")
+		return nil, errors.New(C.GoString(C.sqweezdb_open_error()))
 	}
 	return &DB{p: p}, nil
 }

@@ -64,7 +64,7 @@ fn main() {
       pr("[SQLite, in-process] insert, durable (synchronous=FULL), one connection", 2000, t0.elapsed().as_secs_f64()); }
 
     // ours, in-process
-    let dir = PathBuf::from("data/nocow/e40dir"); let sql = Arc::new(Sql::create(&dir, true)); let mut app = Session::default();
+    let dir = PathBuf::from("data/nocow/e40dir"); let sql = Arc::new(Sql::recreate(&dir, true)); let mut app = Session::default();
     sql.exec_s(&mut app, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
     let ins = sql.prepare(INS).unwrap();
     for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut app, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut app, &ins, &row(id)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut app, "COMMIT", &[]).unwrap(); } }

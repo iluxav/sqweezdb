@@ -33,7 +33,7 @@ fn client_main() {
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("client") { return client_main(); }
     println!("=== E23 / H34: second-process reads over shared memory (E21 refs: socket 3.15 us / 1.45M on 8; SQLite shared file 1.02 us / 5.2M on 8) ===");
-    let dir = PathBuf::from("data/nocow/e23dir"); let sql = Arc::new(Sql::create(&dir, false)); let mut app = Session::default();
+    let dir = PathBuf::from("data/nocow/e23dir"); let sql = Arc::new(Sql::recreate(&dir, false)); let mut app = Session::default();
     sql.exec_s(&mut app, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
     let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap();
     for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut app, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut app, &ins, &row(id)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut app, "COMMIT", &[]).unwrap(); } }

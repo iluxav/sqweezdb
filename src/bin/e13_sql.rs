@@ -62,7 +62,7 @@ fn vals(r: &(i64, f64, i64, i64, String, Vec<u8>)) -> Vec<Value> { vec![Value::I
 
 fn ours_side() {
     let dir = PathBuf::from("data/nocow/e13dir"); let _ = fs::remove_dir_all(&dir);
-    let sql = Arc::new(Sql::create(&dir, false));
+    let sql = Arc::new(Sql::recreate(&dir, false));
     sql.exec(CREATE, &[]).unwrap();
     let ins = sql.prepare(INSERT).unwrap();
     let t = Instant::now(); let mut rng = Rng(7);
@@ -89,7 +89,7 @@ fn ours_side() {
 
     // durable inserts
     let dir = PathBuf::from("data/nocow/e13dur"); let _ = fs::remove_dir_all(&dir);
-    let sql = Arc::new(Sql::create(&dir, true));
+    let sql = Arc::new(Sql::recreate(&dir, true));
     sql.exec(CREATE, &[]).unwrap();
     let ins = sql.prepare(INSERT).unwrap();
     for (threads, per) in [(1usize, 2000i64), (4, 2000), (64, 2000), (256, 2000)] {

@@ -12,7 +12,7 @@ fn pr(label: &str, (ms, v): (f64, f64), rows: f64) { println!("{:<70} {:>9.3} ms
 
 fn main() {
     println!("=== E19b: scan layers over 5M orders (stride = 16 B header + row) ===");
-    let dir = PathBuf::from("data/nocow/e19b"); let sql = Sql::create(&dir, false); let mut app = Session::default();
+    let dir = PathBuf::from("data/nocow/e19b"); let sql = Sql::recreate(&dir, false); let mut app = Session::default();
     sql.exec_s(&mut app, "CREATE TABLE users(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
     sql.exec_s(&mut app, "CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT, amount DOUBLE, status INT, payload BLOB(32))", &[]).unwrap();
     let iu = sql.prepare("INSERT INTO users VALUES (?,?,?,?,?,?)").unwrap(); let io = sql.prepare("INSERT INTO orders VALUES (?,?,?,?,?)").unwrap();

@@ -17,7 +17,7 @@ fn show(label: &str, r: Result<Vec<Vec<Value>>, String>) { match r { Ok(rows) =>
 fn main() {
     println!("=== E16: access control (roles, grants, row policies) ===");
     let dir = PathBuf::from("data/nocow/e16dir"); let _ = fs::remove_dir_all(&dir);
-    let sql = Arc::new(Sql::create(&dir, false));
+    let sql = Arc::new(Sql::recreate(&dir, false));
     let mut app = Session::default();   // the embedding application: unrestricted
     sql.exec_s(&mut app, CREATE, &[]).unwrap();
     let ins = sql.prepare("INSERT INTO docs VALUES (?,?,?,?)").unwrap();

@@ -71,7 +71,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() { Some("client") => return client_main(false), Some("client-durable") => return client_main(true), Some("sqlite-client") => return sqlite_client_main(), _ => {} }
     println!("=== E21: a second program reaching the database ===");
     for durable in [false, true] {
-        let dir = PathBuf::from("data/nocow/e21dir"); let sql = Arc::new(Sql::create(&dir, durable)); let mut app = Session::default();
+        let dir = PathBuf::from("data/nocow/e21dir"); let sql = Arc::new(Sql::recreate(&dir, durable)); let mut app = Session::default();
         sql.exec_s(&mut app, CREATE, &[]).unwrap();
         let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap();
         for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut app, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut app, &ins, &row(id)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut app, "COMMIT", &[]).unwrap(); } }

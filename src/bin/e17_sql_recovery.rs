@@ -21,7 +21,7 @@ fn clear_acks() { for k in 0..THREADS { fs::remove_file(ack_path(k)).ok(); } }
 fn row(id: i64, score: f64) -> Vec<Value> { vec![Value::Int(id), Value::Float(score), Value::Int(id % 1000), Value::Text(format!("a{id}@x")), Value::Bytes(vec![1; 32])] }
 
 fn victim() -> ! {
-    let sql = Arc::new(Sql::create(&PathBuf::from(DIR), true));
+    let sql = Arc::new(Sql::recreate(&PathBuf::from(DIR), true));
     let mut app = Session::default();
     for st in [CREATE, "CREATE ROLE tenant_user", "GRANT SELECT, INSERT ON acct TO tenant_user", "CREATE POLICY own ON acct FOR ALL TO tenant_user USING (owner = SESSION.owner)", "CREATE USER alice IN ROLE tenant_user WITH owner = 7"] { sql.exec_s(&mut app, st, &[]).unwrap(); }
     { let sql = sql.clone(); std::thread::spawn(move || loop { std::thread::sleep(Duration::from_millis(700)); let s = sql.snapshot(); eprintln!("    victim snapshot: {} rows, {:.1} MB, low_water {}, {:.3}s, deleted {} segment(s)", s.rows, s.bytes as f64 / 1e6, s.low_water, s.secs, s.deleted_segments); }); }
@@ -65,7 +65,7 @@ fn kill_round(delay_ms: u64) {
 
 fn restart_time() {
     let dir = PathBuf::from("data/nocow/e17big");
-    let sql = Sql::create(&dir, false); let mut app = Session::default();
+    let sql = Sql::recreate(&dir, false); let mut app = Session::default();
     sql.exec_s(&mut app, CREATE, &[]).unwrap();
     let ins = sql.prepare("INSERT INTO acct VALUES (?,?,?,?,?)").unwrap(); let upd = sql.prepare("UPDATE acct SET score = ? WHERE id = ?").unwrap();
     for id in 1..=2_000_000i64 { if id % 1000 == 1 { sql.exec_s(&mut app, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut app, &ins, &row(id, id as f64)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut app, "COMMIT", &[]).unwrap(); } }

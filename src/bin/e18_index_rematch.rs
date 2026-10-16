@@ -52,7 +52,7 @@ fn main() {
     println!("=== E18: non-unique indexes (rematch) + monomorphized scans ===");
     let (sq5, sj4, sj6) = sqlite_refs();
     let dir = PathBuf::from("data/nocow/e18dir");
-    let sql = Arc::new(Sql::create(&dir, false)); let mut app = Session::default();
+    let sql = Arc::new(Sql::recreate(&dir, false)); let mut app = Session::default();
     sql.exec_s(&mut app, CU, &[]).unwrap(); sql.exec_s(&mut app, CO, &[]).unwrap();
     let iu = sql.prepare("INSERT INTO users VALUES (?,?,?,?,?,?)").unwrap(); let io = sql.prepare("INSERT INTO orders VALUES (?,?,?,?,?)").unwrap();
     let mut rng = Rng(7);

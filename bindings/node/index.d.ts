@@ -64,11 +64,40 @@ export class Database {
 }
 
 export class SqweezError extends Error {
-  /** CONFLICT, DUPLICATE, FOREIGN_KEY, DENIED, NOT_FOUND, TYPE, ARGUMENTS, TRANSACTION, SYNTAX, SCHEMA, CLOSED or ERROR. */
+  /** CONFLICT, DUPLICATE, FOREIGN_KEY, DENIED, NOT_FOUND, TYPE, ARGUMENTS, TRANSACTION, SYNTAX, SCHEMA, CONFIG, CLOSED or ERROR. */
   code: string;
 }
 
 export class RunResult { changes: number; seq: number; readonly durable: Promise<void>; }
 
-/** Options: durable (default false: writes return when visible and `durable` promises cover the fsync); rowMode (default 'auto'). */
-export function open(path: string, opts?: { durable?: boolean; rowMode?: 'auto' | 'native' | 'packed' }): Database;
+/** A duration: '5ms', '1s', '30s', '2m', '1h', '7d', or milliseconds. */
+export type DurationLike = string | number;
+/** A size: '256MB', '1GB', or bytes. 0 turns a policy off. */
+export type SizeLike = string | number;
+export interface BackupOptions {
+  endpoint: string; bucket: string; prefix?: string; region?: string; accessKey: string; secretKey: string;
+  /** AES-256-GCM under a key derived from this passphrase; omit for plaintext (still compressed). */
+  passphrase?: string;
+  interval?: DurationLike; compress?: boolean; compactAfter?: DurationLike; compactEvery?: DurationLike;
+  /** When the directory is empty and the bucket is not, restore the latest state before opening. */
+  bootstrap?: boolean;
+}
+export interface OpenOptions {
+  /** false (default): writes return when visible, `durable` promises cover the fsync. true: every commit waits for its fsync. 'cloud': every commit waits for the bucket. */
+  durable?: boolean | 'cloud';
+  /** Create the directory when it holds no database (default true). An existing database is never wiped. */
+  create?: boolean;
+  backup?: BackupOptions;
+  /** Open as a read-only replica of a primary's directory on this host, or of the bucket a primary backs up to. */
+  follow?: { dir?: string; bucket?: BackupOptions; poll?: DurationLike };
+  /** When the engine snapshots on its own: after this much new log (default '256MB') or after this long without writes (default '30s'). */
+  snapshot?: { logBytes?: SizeLike; idleAfter?: DurationLike };
+  /** Doors for other processes: a Unix socket path and/or a TCP address with its shared token. */
+  listen?: { socket?: string; tcp?: string; token?: string };
+  live?: { debounce?: DurationLike; queue?: number };
+  log?: { threadsIdleAfter?: DurationLike };
+  /** How rows become objects (this binding only). */
+  rowMode?: 'auto' | 'native' | 'packed';
+}
+/** Open or create the database directory. A `sqweezdb.toml` in it is read first; these options win. */
+export function open(path: string, opts?: OpenOptions): Database;

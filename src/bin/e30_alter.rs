@@ -41,7 +41,7 @@ fn report(engine: &str, label: &str, stmt: Duration, done: Duration, w: (u64, Du
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("crash-child") {
-        let dir = PathBuf::from(format!("{DIR}/crash")); let sql = Sql::create(&dir, false); let mut s = Session::default();
+        let dir = PathBuf::from(format!("{DIR}/crash")); let sql = Sql::recreate(&dir, false); let mut s = Session::default();
         sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
         let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
         for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &row(id, &mut rng)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } }
@@ -55,7 +55,7 @@ fn main() {
     let c = Connection::open(DB).unwrap(); c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap(); c.busy_timeout(Duration::from_secs(600)).unwrap();
     c.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, score REAL, country INTEGER, age INTEGER, name TEXT, payload BLOB); CREATE UNIQUE INDEX t_name ON t(name);").unwrap();
     { let mut rng = Rng(7); let tx = c.unchecked_transaction().unwrap(); { let mut st = tx.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); for id in 1..=N { let r = row(id, &mut rng); st.execute(params![id, match r[1] { Value::Float(f) => f, _ => 0.0 }, id % 20, 18 + id % 60, format!("u{id}@example.com"), &[7u8; 64][..]]).unwrap(); } } tx.commit().unwrap(); c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap(); }
-    let dir = PathBuf::from(format!("{DIR}/main")); let sql = Arc::new(Sql::create(&dir, false)); let mut s = Session::default();
+    let dir = PathBuf::from(format!("{DIR}/main")); let sql = Arc::new(Sql::recreate(&dir, false)); let mut s = Session::default();
     sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
     { let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7); for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &row(id, &mut rng)).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } } }
     let (r0, _) = mem(); println!("built: 2M rows both sides; our process {r0:.0} MB");

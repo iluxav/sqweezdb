@@ -41,12 +41,20 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
     Ok(out)
 }
 #[pymethods] impl PyDb {
-    #[new] #[pyo3(signature = (path, durable = false))]
-    fn new(path: &str, durable: bool) -> PyResult<Self> {
+    /// Database(path, durable=False, **options): options are the engine's configuration keys (backup=..., snapshot=...,
+    /// listen=..., follow=..., live=..., log=..., create=...); a sqweezdb.toml in the directory is read first, options win.
+    #[new] #[pyo3(signature = (path, durable = false, **options))]
+    fn new(py: Python<'_>, path: &str, durable: bool, options: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Self> {
         let p = std::path::PathBuf::from(path);
-        let sql = if p.join("snap").exists() || !sqweezdb::table::GLog::list_segments(&p).is_empty() { Sql::open(&p, durable, 4).map_err(pyo3::exceptions::PyRuntimeError::new_err)?.0 } else { Sql::create(&p, durable) };
-        Ok(PyDb { sql: Arc::new(sql) })
+        let dict = match options { Some(d) => d.copy()?, None => pyo3::types::PyDict::new(py) };
+        if !dict.contains("durable")? { dict.set_item("durable", durable)?; }
+        let json: String = py.import("json")?.call_method1("dumps", (&dict,))?.extract()?;
+        let cfg = sqweezdb::config::Config::load(&p, Some(&json)).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let sql = Sql::open_with(&p, cfg).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        Ok(PyDb { sql })
     }
+    /// Stop the background services (backup, snapshot policy, follower).
+    fn close(&self) { self.sql.close() }
     fn prepare(&self, sql: &str) -> PyResult<PyStmt> { Ok(PyStmt { p: self.sql.prepare(sql).map_err(pyo3::exceptions::PyValueError::new_err)? }) }
     fn session(&self) -> PySess { PySess { sql: self.sql.clone(), s: Mutex::new(Session::default()) } }
     fn snapshot(&self) -> u64 { self.sql.snapshot().rows }

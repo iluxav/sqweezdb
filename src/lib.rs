@@ -1,5 +1,6 @@
 pub mod capi;
 pub mod cloud;
+pub mod config;
 pub mod engine;
 pub mod live;
 pub mod net;

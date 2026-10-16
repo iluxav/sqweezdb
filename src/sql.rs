@@ -86,6 +86,7 @@ pub fn error_code(msg: &str) -> &'static str {
     else if m.starts_with("foreign key violation") || m.contains(" blocked: ") { "FOREIGN_KEY" }
     else if m.starts_with("permission denied") { "DENIED" }
     else if m.starts_with("statement needs ") { "ARGUMENTS" }
+    else if m.starts_with("options:") || m.contains("sqweezdb.toml") || m.contains(" is required") || m.starts_with("no database in") || m.starts_with("durable") || m.starts_with("follow") || m.starts_with("listen.") || m.starts_with("snapshot.") || m.starts_with("live.") || m.starts_with("log.") || m.starts_with("backup.") { "CONFIG" }
     else if m.starts_with("already in a transaction") || m.starts_with("not in a transaction") { "TRANSACTION" }
     else if m.contains("type mismatch") || m.contains(" exceeds ") || m.contains("is NOT NULL") || (m.starts_with("expected ") && m.contains(", got ")) || m.contains(": expected ") || m.contains("not a timestamp") { "TYPE" }
     else if m.starts_with("sql parser error") || m.contains("Expected") || m.starts_with("expected ") || m.starts_with("unsupported") { "SYNTAX" }
@@ -566,7 +567,12 @@ impl<'a> Sink<'a> {
     }
 }
 
-pub struct Sql { pub db: Arc<Database>, cache: Arc<Mutex<HashMap<String, Arc<Prepared>>>>, pub acl: std::sync::RwLock<Acl>, pub epoch: Arc<std::sync::atomic::AtomicU64>, alters: Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>>, pub live: std::sync::OnceLock<Arc<crate::live::Reactor>> }
+pub struct Sql { pub db: Arc<Database>, cache: Arc<Mutex<HashMap<String, Arc<Prepared>>>>, pub acl: std::sync::RwLock<Acl>, pub epoch: Arc<std::sync::atomic::AtomicU64>, alters: Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>>, pub live: std::sync::OnceLock<Arc<crate::live::Reactor>>,
+    /// The configuration this database was opened with (defaults when opened through the lab constructors).
+    pub cfg: crate::config::Config, services: Mutex<Option<Services>> }
+/// Background work `open_with` started for this database; stopped by `close` (or when the last handle drops).
+#[derive(Default)] pub struct Services { pub uploader: Option<crate::cloud::Uploader>, pub puller: Option<crate::cloud::BucketPuller>, pub follower: Option<Follower>, snapshotter: Option<(Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>)>, listeners: Vec<std::thread::JoinHandle<()>>, pub snapshots: Arc<std::sync::atomic::AtomicU64> }
+impl Drop for Sql { fn drop(&mut self) { self.close(); } }
 impl Sql { /// The reactive layer for this database (started on first use).
     pub fn reactor(self: &Arc<Self>) -> Arc<crate::live::Reactor> { self.live.get_or_init(|| crate::live::Reactor::start(self.clone())).clone() } }
 /// One committed change, decoded against the table's schema.
@@ -616,7 +622,7 @@ pub struct Follower { pub applied: Arc<std::sync::atomic::AtomicU64>, stop: Arc<
 impl Follower { pub fn applied(&self) -> u64 { self.applied.load(std::sync::atomic::Ordering::Acquire) } }
 impl Drop for Follower { fn drop(&mut self) { self.stop.store(true, std::sync::atomic::Ordering::Relaxed); if let Some(h) = self.thread.take() { h.join().ok(); } } }
 impl Sql {
-    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Arc::new(Mutex::new(HashMap::new())), acl: std::sync::RwLock::new(Acl::default()), epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)), alters: Mutex::new(vec![]), live: std::sync::OnceLock::new() } }
+    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Arc::new(Mutex::new(HashMap::new())), acl: std::sync::RwLock::new(Acl::default()), epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)), alters: Mutex::new(vec![]), live: std::sync::OnceLock::new(), cfg: crate::config::Config::default(), services: Mutex::new(None) } }
     /// Build the new schema and the old-row -> new-row converter for a list of ALTER operations.
     fn alter_schema(old: &Schema, ops: &[AlterOp]) -> Result<(Schema, Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>), String> {
         // working list: (column, source: Some(old index) | None, default, retyped from old type)
@@ -671,9 +677,10 @@ impl Sql {
     /// Wait for every background schema change; returns the first error, if any.
     pub fn wait_alters(&self) -> Result<(), String> { let hs: Vec<_> = self.alters.lock().unwrap().drain(..).collect(); let mut r = Ok(()); for h in hs { if let Err(e) = h.join().map_err(|_| "alter thread panicked".to_string())? { r = Err(e); } } r }
     /// Create a fresh database directory and start it.
-    pub fn create(dir: &std::path::Path, durable: bool) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start(); Sql::new(db) }
+    /// Wipe `dir` and start an empty database there. For tests and experiments; applications use `open_with`.
+    pub fn recreate(dir: &std::path::Path, durable: bool) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start(); Sql::new(db) }
     /// Create with log threads that leave after `idle` of silence (tenant hosting).
-    pub fn create_idle(dir: &std::path::Path, durable: bool, idle: std::time::Duration) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start_idle(idle); Sql::new(db) }
+    pub fn recreate_idle(dir: &std::path::Path, durable: bool, idle: std::time::Duration) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start_idle(idle); Sql::new(db) }
     pub fn open_idle(dir: &std::path::Path, durable: bool, idle: std::time::Duration) -> Result<(Sql, RecStats), String> { let db = Arc::new(Database::open(dir, durable)); let sql = Sql::new(db.clone()); let st = db.recover(1, &mut |text| sql.apply_meta(text))?; db.start_idle(idle); Ok((sql, st)) }
     /// Open an existing database: replay the snapshot catalog + rows, then the log tail, then start the committer.
     pub fn open(dir: &std::path::Path, durable: bool, threads: usize) -> Result<(Sql, RecStats), String> {
@@ -682,6 +689,63 @@ impl Sql {
         let st = db.recover(threads, &mut |text| sql.apply_meta(text))?;
         db.start();
         Ok((sql, st))
+    }
+    /// Open (or create) `dir` with a full configuration: durability mode, backup to a bucket, follower mode, snapshot
+    /// policy, listeners, reactor settings. Starts the background services and returns the shared handle; `close`
+    /// (or dropping the last handle) stops them. Never wipes an existing directory.
+    pub fn open_with(dir: &std::path::Path, cfg: crate::config::Config) -> Result<Arc<Sql>, String> {
+        use crate::config::{Durability, Follow};
+        if let Some(f) = &cfg.follow {
+            let mut sv = Services::default();
+            let (src, poll) = match f {
+                Follow::Dir { dir: src, poll } => (src.clone(), *poll),
+                Follow::Bucket { source, poll } => { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; sv.puller = Some(crate::cloud::start_puller(source.cloud(), dir.to_path_buf(), *poll)); (dir.to_path_buf(), *poll) }
+            };
+            let (sql, follower) = Sql::follow(&src, poll)?;
+            sv.follower = Some(follower);
+            if let Some(p) = &cfg.listen.socket { sv.listeners.push(crate::net::Server::start(sql.clone(), p).map_err(|e| e.to_string())?); }
+            if let Some(a) = &cfg.listen.tcp { sv.listeners.push(crate::net::Server::start_tcp(sql.clone(), a, cfg.listen.token.as_deref().unwrap_or("")).map_err(|e| e.to_string())?); }
+            *sql.services.lock().unwrap() = Some(sv);
+            return Ok(sql);
+        }
+        let existing = dir.join("snap").exists() || !GLog::list_segments(dir).is_empty();
+        if !existing {
+            if !cfg.create { return Err(format!("no database in {} and create is off", dir.display())); }
+            if let Some(b) = &cfg.backup { if b.bootstrap { bootstrap_from_bucket(dir, b)?; } }
+        }
+        let db = Arc::new(Database::open(dir, cfg.durable == Durability::Fsync));
+        let mut sql = Sql::new(db.clone()); sql.cfg = cfg.clone();
+        db.recover(cfg.recover_threads, &mut |text| sql.apply_meta(text))?;
+        match cfg.log.threads_idle_after { Some(d) => db.start_idle(d), None => db.start() }
+        let sql = Arc::new(sql);
+        for (name, _) in sql.db.tables_with_shadow() { sql.spawn_copy(name); }   // resume an interrupted ALTER
+        let mut sv = Services::default();
+        if let Some(b) = &cfg.backup {
+            let up = crate::cloud::start_uploader(b.cloud(), dir.to_path_buf(), db.log.clone());
+            if cfg.durable == Durability::Cloud { db.log.set_cloud_wait(true, Some(up.kick.clone())); }
+            sv.uploader = Some(up);
+        }
+        if let Some(p) = &cfg.listen.socket { sv.listeners.push(crate::net::Server::start(sql.clone(), p).map_err(|e| e.to_string())?); }
+        if let Some(a) = &cfg.listen.tcp { sv.listeners.push(crate::net::Server::start_tcp(sql.clone(), a, cfg.listen.token.as_deref().unwrap_or("")).map_err(|e| e.to_string())?); }
+        if cfg.snapshot.log_bytes.is_some() || cfg.snapshot.idle_after.is_some() { sv.snapshotter = Some(spawn_snapshotter(&sql, cfg.snapshot.clone(), sv.snapshots.clone())); }
+        *sql.services.lock().unwrap() = Some(sv);
+        Ok(sql)
+    }
+    /// Upload counters of the configured backup, if any.
+    pub fn backup_stats(&self) -> Option<Arc<crate::cloud::CloudStats>> { self.services.lock().unwrap().as_ref().and_then(|s| s.uploader.as_ref().map(|u| u.stats.clone())) }
+    /// Snapshots the policy thread has written since open.
+    pub fn snapshots_taken(&self) -> u64 { self.services.lock().unwrap().as_ref().map(|s| s.snapshots.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0) }
+    /// Rows the follower has applied (follower mode), or None.
+    pub fn follower_applied(&self) -> Option<u64> { self.services.lock().unwrap().as_ref().and_then(|s| s.follower.as_ref().map(|f| f.applied())) }
+    /// Stop the background services `open_with` started (backup, follower, snapshot policy). Idempotent. Listeners
+    /// hold only a weak reference and end on their next connection once the database is gone.
+    pub fn close(&self) {
+        let sv = self.services.lock().unwrap().take();
+        if let Some(mut sv) = sv {
+            if let Some((stop, h)) = sv.snapshotter.take() { stop.store(true, std::sync::atomic::Ordering::Relaxed); h.join().ok(); }
+            self.db.log.set_cloud_wait(false, None);
+            sv.uploader.take(); sv.puller.take(); sv.follower.take();
+        }
     }
     /// Like `open`, and resumes any schema change that was interrupted (its shadow exists, no DONE/ABORT logged).
     pub fn open_resume(dir: &std::path::Path, durable: bool, threads: usize) -> Result<(Sql, RecStats, usize), String> {
@@ -720,12 +784,13 @@ impl Sql {
         let sql = Arc::new(Sql::new(db.clone()));
         let st = db.recover(1, &mut |text| sql.apply_meta(text))?;
         let applied = Arc::new(std::sync::atomic::AtomicU64::new(db.log.st.lock().unwrap().seq)); let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (db2, applied2, stop2, dir2, sql2) = (db.clone(), applied.clone(), stop.clone(), dir.to_path_buf(), sql.clone());
+        let (db2, applied2, stop2, dir2, sql2) = (db.clone(), applied.clone(), stop.clone(), dir.to_path_buf(), Arc::downgrade(&sql));
         let h = std::thread::spawn(move || {
             let mut cur = LogCursor::new(&dir2, applied2.load(std::sync::atomic::Ordering::Relaxed));
             while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
                 let recs = cur.poll();
                 if recs.is_empty() { std::thread::sleep(poll); continue; }
+                let Some(sql2) = sql2.upgrade() else { return };   // the database handle is gone
                 for (seq, op, table, payload) in recs { if let Err(e) = db2.apply_record(seq, op, table, &payload, &mut |t| sql2.apply_meta(t)) { eprintln!("follower: {e}"); } applied2.store(seq, std::sync::atomic::Ordering::Release); }
             }
         });
@@ -1123,3 +1188,37 @@ impl Sql {
 }
 enum Store { Empty, Set(KeySet), Dense { min: i64, max: i64, es: usize, data: Vec<u8> }, Hash { map: FastMap<u32>, arena: Vec<u8>, stride: usize } }
 
+
+/// Restore the latest state of a bucket into an empty `dir` before the first open (`backup.bootstrap`). Downloads into
+/// a scratch directory so a `sqweezdb.toml` already in `dir` survives; a bucket with nothing in it leaves `dir` empty.
+fn bootstrap_from_bucket(dir: &std::path::Path, b: &crate::config::Backup) -> Result<(), String> {
+    let scratch = dir.join(".bootstrap");
+    let (s0, chunks, bytes) = crate::cloud::download(&b.cloud(), &scratch)?;
+    if s0 == 0 && chunks == 0 { let _ = std::fs::remove_dir_all(&scratch); return Ok(()); }
+    for e in std::fs::read_dir(&scratch).map_err(|e| e.to_string())? { let e = e.map_err(|e| e.to_string())?; std::fs::rename(e.path(), dir.join(e.file_name())).map_err(|e| e.to_string())?; }
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!("sqweezdb: bootstrapped {} from the bucket ({chunks} log objects, {:.1} MB)", dir.display(), bytes as f64 / 1e6);
+    Ok(())
+}
+/// The snapshot policy thread: a snapshot once the log written since the last one exceeds max(`log_bytes`, size of that
+/// snapshot), or after `idle_after` without a write when something was written since the last one. Holds only a weak
+/// handle, so it ends with the database.
+fn spawn_snapshotter(sql: &Arc<Sql>, pol: crate::config::SnapshotPolicy, count: Arc<std::sync::atomic::AtomicU64>) -> (Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+    use std::sync::atomic::Ordering;
+    let weak = Arc::downgrade(sql); let stop = Arc::new(std::sync::atomic::AtomicBool::new(false)); let stop2 = stop.clone();
+    let h = std::thread::spawn(move || {
+        let tick = std::time::Duration::from_millis(200);
+        let (mut base_bytes, mut snap_seq, mut seen_seq, mut seen_at, mut snap_bytes) = { let Some(sql) = weak.upgrade() else { return }; let sb = std::fs::metadata(sql.db.dir.join("snap")).map(|m| m.len()).unwrap_or(0); let s = sql.db.log.st.lock().unwrap(); (s.bytes, s.seq, s.seq, std::time::Instant::now(), sb) };
+        loop {
+            std::thread::sleep(tick);
+            if stop2.load(Ordering::Relaxed) { return; }
+            let Some(sql) = weak.upgrade() else { return };
+            let (bytes, seq) = { let s = sql.db.log.st.lock().unwrap(); (s.bytes, s.seq) };
+            if seq != seen_seq { seen_seq = seq; seen_at = std::time::Instant::now(); }
+            let by_size = pol.log_bytes.map(|n| bytes.saturating_sub(base_bytes) >= n.max(snap_bytes)).unwrap_or(false);
+            let by_idle = pol.idle_after.map(|d| seq != snap_seq && seen_at.elapsed() >= d).unwrap_or(false);
+            if by_size || by_idle { let st = sql.snapshot(); snap_bytes = st.bytes; count.fetch_add(1, Ordering::Relaxed); let s = sql.db.log.st.lock().unwrap(); base_bytes = s.bytes; snap_seq = s.seq; }
+        }
+    });
+    (stop, h)
+}

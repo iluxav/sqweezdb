@@ -39,7 +39,7 @@ fn main() {
     for (_, q, it) in QS { sq.push(median(*it, || { let mut st = c.prepare_cached(q).unwrap(); let n = st.column_count(); st.query_map([], |r| r.get::<_, Option<f64>>(n - 1)).unwrap().map(|x| x.unwrap().unwrap_or(0.0)).sum() })); }
     drop(c); for suf in ["", "-wal", "-shm"] { fs::remove_file(format!("{}{}", p.display(), suf)).ok(); }
 
-    let dir = PathBuf::from("data/nocow/e24dir"); let sql = Sql::create(&dir, false); let mut app = Session::default();
+    let dir = PathBuf::from("data/nocow/e24dir"); let sql = Sql::recreate(&dir, false); let mut app = Session::default();
     sql.exec_s(&mut app, CU, &[]).unwrap(); sql.exec_s(&mut app, CO, &[]).unwrap();
     let iu = sql.prepare("INSERT INTO users VALUES (?,?,?,?,?,?)").unwrap(); let io = sql.prepare("INSERT INTO orders VALUES (?,?,?,?,?)").unwrap();
     let mut rng = Rng(7);

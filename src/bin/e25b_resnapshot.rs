@@ -40,7 +40,7 @@ fn writes(sql: &Sql, exp: &mut HashMap<i64, Option<f64>>, seed: u64, next_id: &m
 fn main() {
     let dir = PathBuf::from(DIR); let mut exp: HashMap<i64, Option<f64>> = HashMap::new(); let mut next_id = n_rows() + 1;
     let mut total_bad = 0;
-    { let sql = Sql::create(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
+    { let sql = Sql::recreate(&dir, false); let mut s = Session::default(); sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, age INT, name VARCHAR(32) UNIQUE, payload BLOB(64))", &[]).unwrap();
       let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?,?,?)").unwrap(); let mut rng = Rng(7);
       for id in 1..=n_rows() { let sc = (rng.next() % 100000) as f64 / 100.0; sql.execute_s(&mut s, &ins, &row(id, sc)).unwrap(); exp.insert(id, Some(sc)); }
       total_bad += verify(&sql, &exp, "fresh (heap only)"); let st = sql.snapshot(); println!("snapshot 1: {} rows, {:.1} MB", st.rows, st.bytes as f64 / 1e6); }

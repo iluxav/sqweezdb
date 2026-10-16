@@ -49,7 +49,7 @@ fn main() {
     drop(c); for suf in ["", "-wal", "-shm"] { fs::remove_file(format!("{DB}{suf}")).ok(); }
 
     // ---- ours ----
-    let dir = PathBuf::from(format!("{DIR}/db")); let sql = Arc::new(Sql::create(&dir, false)); let mut s = Session::default();
+    let dir = PathBuf::from(format!("{DIR}/db")); let sql = Arc::new(Sql::recreate(&dir, false)); let mut s = Session::default();
     sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, ts INT)", &[]).unwrap();
     let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?)").unwrap();
     let t = Instant::now(); for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Float((id % 1000) as f64), Value::Int(id % 20), Value::Int(0)]).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } } let load_o = t.elapsed();

@@ -48,7 +48,7 @@ fn main() {
     let st3 = { let mut st = c.prepare(T3).unwrap(); let t = Instant::now(); let mut v = 0.0; for _ in 0..200_000 { let id = (rng.next() % ORDERS as u64) as i64 + 1; v += st.query_row(params![id], |r| r.get::<_, f64>(1)).unwrap(); } (t.elapsed().as_secs_f64() * 1e6 / 200_000.0, v) };
     drop(c); for suf in ["", "-wal", "-shm"] { fs::remove_file(format!("{}{}", p.display(), suf)).ok(); }
 
-    let dir = PathBuf::from("data/nocow/e20dir"); let sql = Sql::create(&dir, false); let mut app = Session::default();
+    let dir = PathBuf::from("data/nocow/e20dir"); let sql = Sql::recreate(&dir, false); let mut app = Session::default();
     for st in [CU, CP, CO] { sql.exec_s(&mut app, st, &[]).unwrap(); }
     let iu = sql.prepare("INSERT INTO users VALUES (?,?,?,?,?,?)").unwrap(); let ip = sql.prepare("INSERT INTO products VALUES (?,?,?,?)").unwrap(); let io = sql.prepare("INSERT INTO orders VALUES (?,?,?,?,?,?)").unwrap();
     let mut rng = Rng(7);

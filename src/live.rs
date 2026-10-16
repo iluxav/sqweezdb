@@ -65,7 +65,7 @@ fn key_of(row: &[Value], key_col: Option<usize>) -> Option<i64> { match (key_col
 impl Reactor {
     pub fn start(sql: Arc<Sql>) -> Arc<Reactor> {
         sql.db.log.feeds.fetch_add(1, Ordering::Relaxed);  // keep the memory ring alive
-        let r = Arc::new(Reactor { sql: sql.clone(), state: Arc::new(Mutex::new(State::default())), debounce: Duration::from_millis(5), reruns: AtomicU64::new(0), rerun_us: AtomicU64::new(0), events: AtomicU64::new(0), last_seq: AtomicU64::new(0), stop: Arc::new(AtomicBool::new(false)) });
+        let r = Arc::new(Reactor { sql: sql.clone(), state: Arc::new(Mutex::new(State::default())), debounce: sql.cfg.live.debounce, reruns: AtomicU64::new(0), rerun_us: AtomicU64::new(0), events: AtomicU64::new(0), last_seq: AtomicU64::new(0), stop: Arc::new(AtomicBool::new(false)) });
         let r2 = r.clone(); std::thread::spawn(move || r2.run());
         r
     }
@@ -137,7 +137,7 @@ impl Reactor {
         // an equality on an INT column with a constant makes the subscription indexable
         let key = { let mut all: Vec<Pred> = sp.preds.clone(); match &sp.access { Access::Pk(e) => all.push(Pred { col: sp.table.schema.pk, cmp: Cmp::Eq, rhs: e.clone() }), Access::Index(ix, e) => all.push(Pred { col: ix.col, cmp: Cmp::Eq, rhs: e.clone() }), _ => {} }
             all.iter().find_map(|p| if p.cmp == Cmp::Eq && sp.table.schema.columns[p.col].ty == crate::table::ColType::Int { match &p.rhs { Expr::Lit(Value::Int(v)) => Some((p.col, *v)), Expr::Param(i) => match params.get(*i) { Some(Value::Int(v)) => Some((p.col, *v)), _ => None }, _ => None } } else { None }) };
-        let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: 65536, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
+        let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: self.sql.cfg.live.queue, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
         { let mut st = self.state.lock().unwrap(); st.subs.push(Sub { table: sp.table.id, preds, policies, q: q.clone(), key }); st.reindex(); }
         Ok(Subscription { q })
     }

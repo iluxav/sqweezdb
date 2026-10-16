@@ -17,12 +17,21 @@ fn set_err(db: &Db, e: String) { *db.err.lock().unwrap() = CString::new(e.replac
 unsafe fn cstr(p: *const c_char) -> String { if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() } }
 fn to_value(v: &CValue) -> Value { unsafe { match v.tag { 1 => Value::Int(v.i), 2 => Value::Float(v.f), 3 => Value::Text(String::from_utf8_lossy(std::slice::from_raw_parts(v.ptr, v.len)).into_owned()), 4 => Value::Bytes(std::slice::from_raw_parts(v.ptr, v.len).to_vec()), 5 => Value::Bool(v.i != 0), _ => Value::Null } } }
 
+static OPEN_ERR: std::sync::Mutex<Option<CString>> = std::sync::Mutex::new(None);
 /// Open (or create) a database directory. `durable` != 0 waits for the disk on every commit. Null on failure.
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_open(path: *const c_char, durable: c_int) -> *mut Db {
-    let path = std::path::PathBuf::from(unsafe { cstr(path) });
-    let sql = if path.join("snap").exists() || !crate::table::GLog::list_segments(&path).is_empty() { match Sql::open(&path, durable != 0, 4) { Ok((s, _)) => s, Err(_) => return std::ptr::null_mut() } } else { Sql::create(&path, durable != 0) };
-    Box::into_raw(Box::new(Db { sql: Arc::new(sql), err: std::sync::Mutex::new(CString::default()) }))
+    unsafe { sqweezdb_open_with(path, if durable != 0 { c"{\"durable\":true}".as_ptr() } else { c"{}".as_ptr() }) }
 }
+/// Open (or create) with a JSON options document (the keys of `config.rs`: durable, create, backup, follow, snapshot,
+/// listen, live, log). `<dir>/sqweezdb.toml` is read first; the options win. Null on failure, see `sqweezdb_open_error`.
+#[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_open_with(path: *const c_char, json: *const c_char) -> *mut Db {
+    let path = std::path::PathBuf::from(unsafe { cstr(path) }); let json = unsafe { cstr(json) };
+    let fail = |e: String| { *OPEN_ERR.lock().unwrap() = Some(CString::new(e.replace('\0', " ")).unwrap()); std::ptr::null_mut() };
+    let cfg = match crate::config::Config::load(&path, Some(&json)) { Ok(c) => c, Err(e) => return fail(e) };
+    match Sql::open_with(&path, cfg) { Ok(sql) => Box::into_raw(Box::new(Db { sql, err: std::sync::Mutex::new(CString::default()) })), Err(e) => fail(e) }
+}
+/// Why the last `sqweezdb_open` / `sqweezdb_open_with` returned null (valid until the next open).
+#[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_open_error() -> *const c_char { let g = OPEN_ERR.lock().unwrap(); g.as_ref().map(|c| c.as_ptr()).unwrap_or(c"".as_ptr()) }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_close(db: *mut Db) { if !db.is_null() { drop(unsafe { Box::from_raw(db) }); } }
 /// The last error message of this database handle (valid until the next call).
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_last_error(db: *mut Db) -> *const c_char { let db = unsafe { &*db }; let g = db.err.lock().unwrap(); g.as_ptr() }

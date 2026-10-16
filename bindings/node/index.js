@@ -166,12 +166,18 @@ class Database {
   close() { this._db.close(); }
 }
 
-/** Open or create the database directory. Options: { durable: boolean } (default false: writes return when visible, `durable` promises cover the fsync). */
+/**
+ * Open or create the database directory. Options are the engine's configuration keys:
+ * durable (false | true | 'cloud'), create, backup { endpoint, bucket, prefix, region, accessKey, secretKey,
+ * passphrase, interval, compress, compactAfter, compactEvery, bootstrap }, follow { dir | bucket, poll },
+ * snapshot { logBytes, idleAfter }, listen { socket, tcp, token }, live { debounce, queue }, log { threadsIdleAfter },
+ * plus rowMode for this binding. A sqweezdb.toml in the directory is read first; options win. Never wipes a directory.
+ */
 function open(path, opts) {
-  const durable = !!(opts && opts.durable);
+  const { rowMode, ...engine } = opts || {};
   let handle, sess;
-  try { handle = native.open(path, durable); sess = handle.session(); } catch (e) { throw wrap(e); }
-  return new Database(handle, sess, { path, durable, rowMode: opts && opts.rowMode });
+  try { handle = native.open(path, JSON.stringify(engine)); sess = handle.session(); } catch (e) { throw wrap(e); }
+  return new Database(handle, sess, { path, durable: handle.isDurable(), rowMode });
 }
 
 module.exports = { open, Database, Statement, Subscription, RunResult, SqweezError };

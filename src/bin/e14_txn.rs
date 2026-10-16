@@ -46,7 +46,7 @@ fn sqlite_side() {
 
 fn ours_side(durable: bool) {
     let dir = PathBuf::from(if durable { "data/nocow/e14dur" } else { "data/nocow/e14dir" }); let _ = fs::remove_dir_all(&dir);
-    let sql = Arc::new(Sql::create(&dir, durable));
+    let sql = Arc::new(Sql::recreate(&dir, durable));
     sql.exec(CREATE, &[]).unwrap();
     let tag = if durable { "[ours durable]" } else { "[ours]  " };
     let ins = sql.prepare(INSERT).unwrap();

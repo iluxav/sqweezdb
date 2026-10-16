@@ -47,7 +47,7 @@ fn sqlite_side() {
 
 fn ours_side() {
     let dir = PathBuf::from("data/nocow/e15dir"); let _ = fs::remove_dir_all(&dir);
-    let sql = Arc::new(Sql::create(&dir, false));
+    let sql = Arc::new(Sql::recreate(&dir, false));
     sql.exec(CU, &[]).unwrap(); sql.exec(CO, &[]).unwrap();
     let iu = sql.prepare("INSERT INTO users VALUES (?,?,?,?,?,?)").unwrap(); let io = sql.prepare("INSERT INTO orders VALUES (?,?,?,?,?)").unwrap();
     let mut rng = Rng(7); let mut sess = Session::default();

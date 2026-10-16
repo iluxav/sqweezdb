@@ -25,7 +25,7 @@ impl TenantHost {
         let shard = &self.open[Self::shard(name)];
         { let mut open = shard.lock().unwrap(); if let Some(o) = open.get_mut(name) { o.last_used = Instant::now(); return Ok(o.sql.clone()); } }
         let t = Instant::now(); let dir = self.dir(name);
-        let sql = if dir.exists() { Arc::new(Sql::open_idle(&dir, self.durable, self.idle)?.0) } else { let s = Sql::create_idle(&dir, self.durable, self.idle); let mut se = Session::default(); for q in init { s.exec_s(&mut se, q, &[])?; } Arc::new(s) };
+        let sql = if dir.exists() { Arc::new(Sql::open_idle(&dir, self.durable, self.idle)?.0) } else { let s = Sql::recreate_idle(&dir, self.durable, self.idle); let mut se = Session::default(); for q in init { s.exec_s(&mut se, q, &[])?; } Arc::new(s) };
         self.opens.fetch_add(1, Ordering::Relaxed); self.open_us.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
         let mut open = shard.lock().unwrap();
         if let Some(o) = open.get(name) { return Ok(o.sql.clone()); }  // someone else opened it meanwhile
