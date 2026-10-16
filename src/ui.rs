@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const PAGE: &str = include_str!("ui/index.html");
-const MAX_BODY: usize = 1 << 20;
+const MAX_BODY: usize = 1 << 20; const MAX_LINE: u64 = 16 << 10; const MAX_HEADERS: usize = 64;
+/// Idle keep-alive connections and stalled writers are dropped after this long.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
 type Cols = Vec<(String, Option<ColType>)>;
 
 pub fn start(sql: Arc<Sql>, addr: &str, token: &str) -> Result<crate::net::Listener, String> {
@@ -23,7 +25,7 @@ pub fn start(sql: Arc<Sql>, addr: &str, token: &str) -> Result<crate::net::Liste
     let weak = Arc::downgrade(&sql); drop(sql); let token: Arc<str> = Arc::from(token);
     crate::net::accept_tcp(listener, move |stream| {
         if weak.strong_count() == 0 { return false; }
-        stream.set_nodelay(true).ok();
+        stream.set_nodelay(true).ok(); stream.set_read_timeout(Some(IO_TIMEOUT)).ok(); stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
         let (w, t) = (weak.clone(), token.clone());
         std::thread::spawn(move || { let _ = serve(w, stream, &t); });
         true
@@ -31,11 +33,23 @@ pub fn start(sql: Arc<Sql>, addr: &str, token: &str) -> Result<crate::net::Liste
 }
 
 struct Req { method: String, path: String, query: HashMap<String, String>, headers: HashMap<String, String>, body: Vec<u8> }
+/// One CRLF/LF-terminated line of at most MAX_LINE bytes; `None` at a clean end of stream. Requests are read before
+/// the token is checked, so nothing here may grow with what a client sends.
+fn read_line_max(r: &mut BufReader<TcpStream>) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new(); let n = r.by_ref().take(MAX_LINE).read_until(b'\n', &mut buf)?;
+    if n == 0 { return Ok(None); }
+    if buf.last() != Some(&b'\n') { return Err(std::io::Error::other("request line or header too long")); }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
 fn read_req(r: &mut BufReader<TcpStream>) -> std::io::Result<Option<Req>> {
-    let mut line = String::new(); if r.read_line(&mut line)? == 0 { return Ok(None); }
+    let Some(line) = read_line_max(r)? else { return Ok(None) };
     let mut parts = line.split_whitespace(); let method = parts.next().unwrap_or("").to_string(); let target = parts.next().unwrap_or("/").to_string();
     let mut headers = HashMap::new();
-    loop { let mut h = String::new(); if r.read_line(&mut h)? == 0 { return Ok(None); } let h = h.trim_end(); if h.is_empty() { break; } if let Some((k, v)) = h.split_once(':') { headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string()); } }
+    for n in 0.. {
+        let Some(h) = read_line_max(r)? else { return Ok(None) }; let h = h.trim_end(); if h.is_empty() { break; }
+        if n >= MAX_HEADERS { return Err(std::io::Error::other("too many header lines")); }   // lines, not names: a repeated name must count too
+        if let Some((k, v)) = h.split_once(':') { headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string()); }
+    }
     let len: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
     if len > MAX_BODY { return Err(std::io::Error::other("body too large")); }
     let mut body = vec![0u8; len]; if len > 0 { r.read_exact(&mut body)?; }
@@ -54,8 +68,29 @@ fn url_decode(s: &str) -> String {
 fn respond(w: &mut TcpStream, status: u16, ctype: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match status { 200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 404 => "Not Found", 405 => "Method Not Allowed", _ => "Error" };
     // one write per response: a response written in fragments waits on the peer's delayed ACK for each one
-    let mut out = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:\r\nConnection: keep-alive\r\n\r\n", body.len()).into_bytes();
+    let mut out = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: {}\r\nConnection: keep-alive\r\n\r\n", body.len(), csp()).into_bytes();
     out.extend_from_slice(body); w.write_all(&out)?; w.flush()
+}
+/// The page's own script is allowed by its SHA-256 hash and nothing else may run: no inline handlers, no injected
+/// scripts, even if a value ever reached the markup unescaped.
+fn csp() -> &'static str {
+    static CSP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CSP.get_or_init(|| {
+        use sha2::Digest;
+        let script = PAGE.split_once("<script>").and_then(|(_, rest)| rest.split_once("</script>")).map(|(s, _)| s).unwrap_or("");
+        let hash = base64(&sha2::Sha256::digest(script.as_bytes()));
+        format!("default-src 'none'; script-src 'sha256-{hash}'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    })
+}
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((b.len() + 2) / 3 * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char); out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' }); out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 fn json_resp(w: &mut TcpStream, status: u16, v: &J) -> std::io::Result<()> { respond(w, status, "application/json", v.to_string().as_bytes()) }
 fn authorized(req: &Req, token: &str) -> bool {
@@ -172,4 +207,11 @@ fn stream_events(weak: &std::sync::Weak<Sql>, sess: &Session, req: &Req, mut w: 
             None => if quiet.elapsed() >= Duration::from_secs(15) { w.write_all(b": keepalive\n\n")?; w.flush()?; quiet = Instant::now(); },
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn base64_matches_rfc4648() { assert_eq!(base64(b""), ""); assert_eq!(base64(b"f"), "Zg=="); assert_eq!(base64(b"fo"), "Zm8="); assert_eq!(base64(b"foo"), "Zm9v"); assert_eq!(base64(b"foobar"), "Zm9vYmFy"); }
+    #[test] fn csp_allows_only_the_page_script() { let c = csp(); assert!(c.contains("script-src 'sha256-") && !c.contains("script-src 'unsafe-inline'")); assert!(PAGE.matches("<script>").count() == 1, "the hash covers exactly one inline script"); }
 }

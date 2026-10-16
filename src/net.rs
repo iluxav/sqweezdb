@@ -99,13 +99,18 @@ fn decode_result(b: &[u8], p: &mut usize) -> Result<Vec<Vec<Value>>, String> {
     for _ in 0..nrows { let mut row = Vec::with_capacity(ncols); for _ in 0..ncols { row.push(get_value(b, p)?); } rows.push(row); }
     Ok(rows)
 }
-fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> { let mut l = [0u8; 4]; r.read_exact(&mut l)?; let n = u32::from_le_bytes(l) as usize; let mut b = vec![0u8; n]; r.read_exact(&mut b)?; Ok(b) }
+/// Largest request a server accepts (a batch of statements); a client's announced length is checked before allocating.
+const MAX_FRAME: usize = 64 << 20;
+/// Before authentication only the token frame is expected.
+const MAX_AUTH_FRAME: usize = 4 << 10;
+fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> { read_frame_max(r, usize::MAX) }
+fn read_frame_max(r: &mut impl Read, max: usize) -> std::io::Result<Vec<u8>> { let mut l = [0u8; 4]; r.read_exact(&mut l)?; let n = u32::from_le_bytes(l) as usize; if n > max { return Err(std::io::Error::other(format!("frame of {n} bytes exceeds the limit of {max}"))); } let mut b = vec![0u8; n]; r.read_exact(&mut b)?; Ok(b) }
 fn write_frame(w: &mut impl Write, b: &[u8]) -> std::io::Result<()> { w.write_all(&(b.len() as u32).to_le_bytes())?; w.write_all(b)?; w.flush() }
 
 /// Anything the server can serve and the client can speak over: Unix sockets locally, TCP for other hosts.
-pub trait Stream: Read + Write + Send + 'static { fn dup(&self) -> std::io::Result<Self> where Self: Sized; }
+pub trait Stream: Read + Write + Send + 'static { fn dup(&self) -> std::io::Result<Self> where Self: Sized; fn clear_timeout(&self) {} }
 impl Stream for UnixStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
-impl Stream for TcpStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
+impl Stream for TcpStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } fn clear_timeout(&self) { self.set_read_timeout(None).ok(); } }
 
 /// An accept loop that can be stopped: `shutdown` (or drop) sets a flag, connects once to wake the blocked accept,
 /// joins the thread, and so frees the port (and removes a Unix socket file).
@@ -150,7 +155,7 @@ impl Server {
     pub fn start_tcp(sql: Arc<Sql>, addr: &str, token: &str) -> std::io::Result<Listener> {
         if token.is_empty() { return Err(std::io::Error::other("a TCP listener needs a non-empty token")); }
         let listener = TcpListener::bind(addr)?; let token: Arc<str> = Arc::from(token); let weak = Arc::downgrade(&sql); drop(sql);
-        accept_tcp(listener, move |stream| { if weak.strong_count() == 0 { return false; } stream.set_nodelay(true).ok(); let (w, t) = (weak.clone(), token.clone()); std::thread::spawn(move || { let _ = Self::serve(w, stream, Some(t), true); }); true })
+        accept_tcp(listener, move |stream| { if weak.strong_count() == 0 { return false; } stream.set_nodelay(true).ok(); stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok(); let (w, t) = (weak.clone(), token.clone()); std::thread::spawn(move || { let _ = Self::serve(w, stream, Some(t), true); }); true })
     }
     fn serve<S: Stream>(weak: std::sync::Weak<Sql>, stream: S, token: Option<Arc<str>>, remote: bool) -> std::io::Result<()> {
         let mut r = BufReader::with_capacity(1 << 16, stream.dup()?); let mut w = BufWriter::with_capacity(1 << 16, stream);
@@ -158,12 +163,13 @@ impl Server {
         let mut ring_closer: Option<Arc<std::sync::atomic::AtomicBool>> = None;
         if let Some(t) = &token {
             // first frame must be the token; anything else closes the connection without a hint
-            let req = read_frame(&mut r)?;
+            let req = read_frame_max(&mut r, MAX_AUTH_FRAME)?;
             if req.first() != Some(&K_AUTH) || !same_secret(&req[1..], t.as_bytes()) { encode_result(&mut out, &Err("authentication failed".into())); write_frame(&mut w, &out)?; return Ok(()); }
             encode_result(&mut out, &Ok(vec![])); write_frame(&mut w, &out)?;
+            w.get_ref().clear_timeout();   // authenticated: idle connections may wait as long as they like
         }
         loop {
-            let req = match read_frame(&mut r) { Ok(b) => b, Err(_) => { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) } };
+            let req = match read_frame_max(&mut r, MAX_FRAME) { Ok(b) => b, Err(_) => { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) } };
             out.clear();
             if req.is_empty() { continue; }
             let Some(sql) = weak.upgrade() else { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) };   // held for this request only
