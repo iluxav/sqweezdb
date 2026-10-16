@@ -1,0 +1,10 @@
+=== Node bindings: ours (N-API addon) vs node:sqlite (DatabaseSync); 1M rows ===
+ours    load 1M rows, 1000-row txns          1.08 us/row
+ours    point read by id, sync                0.76 us
+ours    point reads, 8 async streams          0.61M/s (800000 reads; node:sqlite has no async path)
+ours    single-row inserts, autocommit        1.28 us
+ours    fetch 1000 rows by id range            221.3 us
+sqlite  load 1M rows, 1000-row txns          0.47 us/row
+sqlite  point read by id, sync                1.39 us
+sqlite  single-row inserts, autocommit        9.04 us
+sqlite  fetch 1000 rows by id range            166.7 us

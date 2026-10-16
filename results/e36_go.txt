@@ -1,0 +1,11 @@
+=== Go bindings: ours (cgo over the C ABI) vs go-sqlite3 (cgo, database/sql); 1M rows ===
+ours    load 1M rows, 1000-row txns          0.87 us/row
+ours    point read by id, 1 goroutine         0.56 us
+ours    point reads, 8 goroutines             9.22M/s
+ours    single-row inserts, autocommit        0.93 us
+ours    fetch 1000 rows by id range            76.6 us
+sqlite3 load 1M rows, 1000-row txns          0.77 us/row
+sqlite3 point read by id, 1 goroutine         1.88 us
+sqlite3 point reads, 8 goroutines             0.92M/s
+sqlite3 single-row inserts, autocommit        11.02 us
+sqlite3 fetch 1000 rows by id range            195.6 us

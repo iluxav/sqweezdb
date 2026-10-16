@@ -1,0 +1,11 @@
+=== Python bindings: ours (PyO3 extension) vs the sqlite3 module (C); 1M rows ===
+ours    load 1M rows, 1000-row txns          1.72 us/row
+ours    point read by id, 1 thread            0.76 us
+ours    point reads, 8 threads                0.72M/s
+ours    single-row inserts, autocommit        1.80 us
+ours    fetch 1000 rows by id range            96.5 us
+sqlite3 load 1M rows, 1000-row txns          1.16 us/row
+sqlite3 point read by id, 1 thread            1.93 us
+sqlite3 point reads, 8 threads                0.13M/s
+sqlite3 single-row inserts, autocommit        12.26 us
+sqlite3 fetch 1000 rows by id range            261.3 us

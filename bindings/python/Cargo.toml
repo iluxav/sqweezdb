@@ -1,0 +1,15 @@
+[package]
+name = "pydblab"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "pydblab"
+crate-type = ["cdylib"]
+
+[dependencies]
+dblab = { path = "../.." }
+pyo3 = { version = "0.28", features = ["extension-module"] }
+
+[profile.release]
+debug = 1

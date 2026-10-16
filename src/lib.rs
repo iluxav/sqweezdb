@@ -1,3 +1,4 @@
+pub mod capi;
 pub mod cloud;
 pub mod engine;
 pub mod net;

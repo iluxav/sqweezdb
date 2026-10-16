@@ -1,0 +1,14 @@
+=== E35: encryption before upload (AES-256-GCM after zstd; 1M rows; local rclone S3 server) ===
+A. snapshot 49.3 MB, zstd only: 6.0 MB in 56 ms (878 MB/s), back in 21 ms (2403 MB/s), round trip exact
+A. snapshot 49.3 MB, AES-256-GCM only: 49.3 MB in 36 ms (1388 MB/s), back in 31 ms (1595 MB/s), round trip exact
+A. snapshot 49.3 MB, zstd then AES-256-GCM: 6.0 MB in 58 ms (848 MB/s), back in 23 ms (2182 MB/s), round trip exact
+B. snapshot uploaded encrypted in 1.08 s: 6.0 MB in 1 multipart parts; key 00000000000000001001.zst.enc; the object starts 45 4e 43 31 87 6b 5b 00 1a 95 ae d8 and compresses to 1.000x of its size (random-looking)
+B. cloud-durable commits with compression + encryption, 256 writers: 63944 commits/s, latency p50 3.3 ms (E33 without either: 41,392/s at 5.0 ms)
+C. restore with the right key: 5315 objects, 8.7 MB, 0.60 s -> 1198484 rows vs primary 1198484 (EXACT)
+C. restore with a wrong passphrase: refused: snapshot primary/snap/00000000000000001001.zst.enc: object failed authentication: wrong key, or the data was altered in 
+C. restore with no key: refused: snapshot primary/snap/00000000000000001001.zst.enc: object is encrypted and no key was given
+C. one bit flipped inside 00000000000010320700-00000000000000000468.zst.enc in the bucket: restore refused: chunk primary/log/00000000000000001002/00000000000010320700-00000000000000000468.zst.enc: object failed authentication: wrong key, or the da
+C. bit restored: restore ok, 2777 objects
+D. follower fed by the encrypted bucket: 1198494 rows vs primary 1198494 (EXACT); a commit is visible after 103 ms (median, 100 ms cadence)
+E. Litestream 0.5.17: no encryption option in the binary or its example configuration; SQLite itself encrypts only with the commercial SEE extension or third-party SQLCipher
+exit 0
