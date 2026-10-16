@@ -71,11 +71,11 @@ fn main() {
     let t = Instant::now(); for id in N + 500_000..N + 600_000 { sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Float(1.0), Value::Int(id % 20), Value::Int(0)]).unwrap(); } println!("ours    100k single-row inserts with nobody listening: {:.1} us/write", us(t.elapsed(), 100_000));
     // resume: a consumer that stopped at `stopped_at` comes back and gets exactly the writes it missed, in order
     let mut f = sql.subscribe(stopped_at); let mut got = vec![]; loop { let ch = f.poll(); if ch.is_empty() { break; } got.extend(ch); }
-    let in_order = got.windows(2).all(|w| w[0].seq < w[1].seq); let first = got.first().map(|c| c.pk).unwrap_or(0); let last = got.last().map(|c| c.pk).unwrap_or(0);
+    let in_order = got.windows(2).all(|w| w[0].seq < w[1].seq); let pk_i = |v: &sqweezdb::table::Value| if let sqweezdb::table::Value::Int(i) = v { *i } else { 0 }; let first = got.first().map(|c| pk_i(&c.pk)).unwrap_or(0); let last = got.last().map(|c| pk_i(&c.pk)).unwrap_or(0);
     println!("ours    resume from sequence {stopped_at}: {} changes delivered, in order {in_order}, first pk {first}, last pk {last} (expected 110000: the 10k steady-rate inserts from {} then the 100k from {}..{})", got.len(), N + 400_000, N + 500_000, N + 599_999);
     // a schema change in the middle: one event per logical change, decoded with the right schema
     let from = sql.current_seq(); sql.exec_s(&mut s, "ALTER TABLE t ADD COLUMN flag BOOL NOT NULL DEFAULT FALSE", &[]).unwrap(); sql.exec_s(&mut s, "INSERT INTO t(id, score, country, ts) VALUES (77000001, 3.0, 1, 0)", &[]).unwrap(); sql.wait_alters().unwrap(); sql.exec_s(&mut s, "INSERT INTO t(id, score, country, ts) VALUES (77000002, 4.0, 1, 0)", &[]).unwrap();
     let mut f = sql.subscribe(from); let mut got = vec![]; loop { let ch = f.poll(); if ch.is_empty() { break; } got.extend(ch); }
-    println!("ours    across an ALTER TABLE (one insert during the copy, one after): {} events for 2 inserts: {:?}", got.len(), got.iter().map(|c| format!("pk {} with {} columns", c.pk, c.row.as_ref().map(|r| r.len()).unwrap_or(0))).collect::<Vec<_>>());
+    println!("ours    across an ALTER TABLE (one insert during the copy, one after): {} events for 2 inserts: {:?}", got.len(), got.iter().map(|c| format!("pk {:?} with {} columns", c.pk, c.row.as_ref().map(|r| r.len()).unwrap_or(0))).collect::<Vec<_>>());
     drop(ins); drop(up); drop(del); drop(sql); let _ = fs::remove_dir_all(DIR);
 }

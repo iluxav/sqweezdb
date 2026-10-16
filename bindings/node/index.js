@@ -41,10 +41,15 @@ function decoder(names) {
     return first ? null : out;
   };
 }
-class Entry { constructor(stmt) { this.stmt = stmt; this._dec = null; } get dec() { return this._dec || (this._dec = decoder(this.stmt.columns())); } }
+class Entry {
+  constructor(stmt) { this.stmt = stmt; this._dec = null; this._kind = -1; this._rows = 0; }
+  get dec() { return this._dec || (this._dec = decoder(this.stmt.columns())); }
+  get kind() { if (this._kind < 0) { this._kind = this.stmt.kind(); this._rows = this.stmt.rowsPerRun(); } return this._kind; }
+  get rows() { this.kind; return this._rows; }
+}
 
 class RunResult {
-  constructor(db, changes, seq, committed) { this._db = db; this.changes = changes; this.seq = seq; this._committed = committed; }
+  constructor(db, changes, seq, committed, lastInsertId) { this._db = db; this.changes = changes; this.seq = seq; this._committed = committed; if (lastInsertId !== undefined) this.lastInsertId = lastInsertId; }
   /** Resolves once this write's commit is fsynced (immediately if the database is durable or the write is inside an open transaction). */
   get durable() { return this._committed && !this._db.durable ? this._db._db.waitDurable(this.seq) : Promise.resolve(); }
 }
@@ -54,7 +59,7 @@ class Statement {
   get columns() { return this._e.stmt.columns(); }
   get(...args) { return this._db._get(this._e, flat(args)); }
   all(...args) { return this._db._all(this._e, flat(args)); }
-  run(...args) { return this._db._run(this._e.stmt, flat(args)); }
+  run(...args) { return this._db._run(this._e, flat(args)); }
   allAsync(...args) { return this._db._sess.allAsync(this._e.stmt, flat(args)).catch((e) => { throw wrap(e); }); }
 }
 
@@ -106,11 +111,12 @@ class Database {
   }
   _get(e, p) { try { return this.rowMode === 'packed' ? e.dec(this._sess.packed(e.stmt, p), true) : this._sess.get(e.stmt, p); } catch (err) { throw wrap(err); } }
   _all(e, p) { try { return this.rowMode === 'native' ? this._sess.all(e.stmt, p) : e.dec(this._sess.packed(e.stmt, p), false); } catch (err) { throw wrap(err); } }
-  _run(stmt, p) {
+  _run(e, p) {
     let v;
-    try { v = this._sess.run(stmt, p); }
-    catch (e) { const w = wrap(e); if (w.code === 'NOT_FOUND') return new RunResult(this, 0, 0, false); throw w; }
+    try { v = this._sess.run(e.stmt, p); }
+    catch (err) { const w = wrap(err); if (w.code === 'NOT_FOUND') return new RunResult(this, 0, 0, false); throw w; }
     if (v < 0) { const committed = !this._sess.inTxn(); return new RunResult(this, -v - 1, committed ? this._sess.lastSeq() : 0, committed); }
+    if (e.kind === 4) return new RunResult(this, e.rows, v, v > 0, this._sess.lastInsertId());
     return new RunResult(this, 1, v, v > 0);
   }
   /** Prepare once, run many times. */
@@ -122,7 +128,7 @@ class Database {
   /** All rows as objects. */
   all(sql, params) { return this._all(this._prep(sql), norm(params)); }
   /** A write: returns { changes, seq, durable } where `durable` is a promise for the fsync. */
-  run(sql, params) { return this._run(this._prep(sql).stmt, norm(params)); }
+  run(sql, params) { return this._run(this._prep(sql), norm(params)); }
   /** Resolves once everything this database handle has committed so far is on disk. */
   flush() { const seq = this._sess.lastSeq(); return seq > 0 && !this.durable ? this._db.waitDurable(seq) : Promise.resolve(); }
   /**
@@ -135,8 +141,8 @@ class Database {
     return function (...args) {
       if (db._sess.inTxn()) return fn(db, ...args);
       for (let attempt = 0; ; attempt++) {
-        db._run(begin.stmt, []);
-        try { const out = fn(db, ...args); db._run(commit.stmt, []); return out; }
+        db._run(begin, []);
+        try { const out = fn(db, ...args); db._run(commit, []); return out; }
         catch (e) {
           try { db._sess.run(rollback.stmt, []); } catch (_) { /* already out of the transaction */ }
           const w = wrap(e);

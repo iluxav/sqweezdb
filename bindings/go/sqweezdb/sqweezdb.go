@@ -7,7 +7,7 @@ package sqweezdb
 #include <stddef.h>
 typedef struct Db Db; typedef struct Stmt Stmt; typedef struct Sess Sess; typedef struct Rows Rows;
 typedef struct { int tag; long long i; double f; const unsigned char* ptr; size_t len; } CValue;
-Db* sqweezdb_open(const char* path, int durable); Db* sqweezdb_open_with(const char* path, const char* json); const char* sqweezdb_open_error(); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
+Db* sqweezdb_open(const char* path, int durable); long long sqweezdb_last_insert_id(Sess*); Db* sqweezdb_open_with(const char* path, const char* json); const char* sqweezdb_open_error(); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
 Sess* sqweezdb_session(Db*); void sqweezdb_session_free(Sess*); int sqweezdb_login(Db*, Sess*, const char*);
 Stmt* sqweezdb_prepare(Db*, const char*); void sqweezdb_finalize(Stmt*);
 Rows* sqweezdb_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* sqweezdb_exec_text(Db*, Sess*, const char*, const CValue*, int);
@@ -115,6 +115,9 @@ func (db *DB) Prepare(sql string) (*Stmt, error) {
 	return &Stmt{p: p}, nil
 }
 func (st *Stmt) Close() { C.sqweezdb_finalize(st.p) }
+// LastInsertID is the primary key of the last row this session inserted (an automatic id, or the one given).
+func (s *Session) LastInsertID() int64 { return int64(C.sqweezdb_last_insert_id(s.p)) }
+
 func (s *Session) Login(user string) error {
 	cu := C.CString(user)
 	defer C.free(unsafe.Pointer(cu))

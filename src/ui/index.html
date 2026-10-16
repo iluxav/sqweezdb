@@ -25,6 +25,27 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
 .badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:600; background:var(--bg); border:1px solid var(--line) } .badge.live { color:var(--accent); border-color:var(--accent) } .badge.insert { color:var(--good) } .badge.delete { color:var(--bad) } .badge.update { color:#8a6d00 }
 .events { max-height:60vh; overflow:auto; font-family:var(--mono); font-size:12px } .events div { padding:4px 0; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:baseline } .events .k { color:var(--muted) }
 .hidden { display:none } .muted { color:var(--muted) } code { font-family:var(--mono); font-size:12px }
+/* table designer */
+.panel h2.withbtn { display:flex; align-items:center; justify-content:space-between }
+button.icon { padding:1px 8px; font-size:15px; line-height:1.3 } h2 button.icon { color:var(--accent); border-color:var(--line) }
+.tables li .tedit { padding:0 6px; font-size:12px; line-height:1.6; margin-left:auto; opacity:0; border-color:transparent; background:transparent; color:var(--muted) }
+.tables li:hover .tedit, .tables li .tedit:focus { opacity:1 } .tables li .tedit:hover { color:var(--ink); border-color:var(--line) }
+.modal { position:fixed; inset:0; background:rgba(10,12,16,.55); display:flex; align-items:flex-start; justify-content:center; padding:6vh 16px 16px; z-index:10; overflow:auto }
+.modal.hidden { display:none }
+.sheet { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(1120px,100%); padding:16px 18px; box-shadow:0 24px 64px rgba(0,0,0,.35) }
+.sheet-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px } .sheet-head h3 { margin:0; font-size:16px }
+.field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); margin-bottom:14px; max-width:360px }
+.field input, .colgrid input, .colgrid select { font:13px var(--sans); padding:5px 7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); width:100%; min-width:0 }
+.field input:disabled, .colgrid input:disabled, .colgrid select:disabled { opacity:.55 }
+.colgrid { display:grid; grid-template-columns:minmax(120px,1.5fr) 118px 74px 34px 58px 58px minmax(90px,1fr) minmax(170px,1.5fr) 32px; gap:6px 8px; align-items:center }
+.colgrid .h { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); white-space:nowrap }
+.colgrid .c { display:flex; justify-content:center } .colgrid input[type=checkbox], .colgrid input[type=radio] { width:auto; accent-color:var(--accent) }
+.colgrid .ref { display:flex; gap:4px } .colgrid .ref select:last-child { max-width:96px }
+.colgrid .gone input, .colgrid .gone select { text-decoration:line-through; opacity:.45 }
+.colgrid .tag { font-size:10px; color:var(--accent); margin-left:4px }
+pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:12px/1.55 var(--mono); white-space:pre-wrap; margin:12px 0 0; max-height:24vh; overflow:auto }
+.sheet-foot { display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap } .sheet-foot .muted { flex:1; font-size:12px; min-width:200px } .sheet-foot .bad { color:var(--bad) }
+@media (max-width: 900px) { .colgrid { grid-template-columns:1fr 1fr } .colgrid .h { display:none } }
 </style>
 </head>
 <body>
@@ -36,7 +57,7 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
 </header>
 <main>
   <aside>
-    <section class="panel tables"><h2>Tables</h2><ul id="tables"><li class="muted">—</li></ul></section>
+    <section class="panel tables"><h2 class="withbtn">Tables <button id="newtable" class="icon" title="New table" aria-label="New table">+</button></h2><ul id="tables"><li class="muted">—</li></ul></section>
     <section class="panel"><h2>Status</h2><div class="kv" id="status"></div><div class="row"><button id="snap">Snapshot now</button><span class="meta" id="snapmeta"></span></div></section>
   </aside>
   <section>
@@ -57,6 +78,17 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
     </div>
   </section>
 </main>
+<div id="designer" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="dtitle">
+  <div class="sheet">
+    <div class="sheet-head"><h3 id="dtitle">New table</h3><button id="dclose" class="icon" aria-label="Close">×</button></div>
+    <label class="field">Table name<input id="dname" autocomplete="off" spellcheck="false" placeholder="orders"></label>
+    <div class="colgrid" id="dcols"></div>
+    <div class="row"><button id="daddcol">+ Add column</button></div>
+    <pre class="sql" id="dsql"></pre>
+    <div id="derr" class="err hidden" style="margin-top:10px"></div>
+    <div class="sheet-foot"><span class="muted" id="dhint"></span><button id="dcancel">Cancel</button><button id="dapply" class="primary">Create table</button></div>
+  </div>
+</div>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -84,9 +116,13 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
         ['listeners', [st.listen.socket, st.listen.tcp, st.listen.http].filter(Boolean).join('  ') || 'none'], st.reactor ? ['live events', `${st.reactor.events.toLocaleString()} (${st.reactor.reruns} re-runs)`] : null].filter(Boolean);
       $('status').innerHTML = rows.map(([k, v]) => `<b>${esc(k)}</b><span>${esc(v)}</span>`).join('');
       const ts = await api('/api/tables');
-      $('tables').innerHTML = ts.length ? ts.map((t) => `<li data-name="${esc(t.name)}"><div>${esc(t.name)}<small>${t.columns.map((c) => esc(c.name) + (c.pk ? ' 🔑' : '')).join(', ')}</small></div><span class="n">${t.rows < 0 ? '?' : Number(t.rows).toLocaleString()}</span></li>`).join('') : '<li class="muted">no tables yet</li>';
-      for (const li of $('tables').querySelectorAll('li[data-name]')) li.onclick = () => { $('sql').value = `SELECT * FROM ${li.dataset.name} LIMIT 100`; run(); showTab('console'); };
-      if ($('sql').value.trim() === 'SELECT count(*) AS rows FROM' && ts.length) $('sql').value = `SELECT count(*) AS rows FROM ${ts[0].name}`;
+      tablesCache = ts;
+      // rebuild the list only when it changed: replacing it under the pointer every 2 s would swallow clicks
+      const key = JSON.stringify(ts); if (key === tablesKey) return; tablesKey = key;
+      $('tables').innerHTML = ts.length ? ts.map((t) => `<li data-name="${esc(t.name)}"><div>${esc(t.name)}<small>${t.columns.map((c) => esc(c.name) + (c.pk ? ' 🔑' : '')).join(', ')}</small></div><button class="tedit" data-edit="${esc(t.name)}" title="Edit table" aria-label="Edit table ${esc(t.name)}">✎</button><span class="n">${t.rows < 0 ? '?' : Number(t.rows).toLocaleString()}</span></li>`).join('') : '<li class="muted">no tables yet · <a href="#" id="firsttable">create one</a></li>';
+      for (const li of $('tables').querySelectorAll('li[data-name]')) li.onclick = (e) => { if (e.target.closest('.tedit')) { openDesigner(li.dataset.name); return; } $('sql').value = `SELECT * FROM ${qid(li.dataset.name)} LIMIT 100`; run(); showTab('console'); };
+      if ($('firsttable')) $('firsttable').onclick = (e) => { e.preventDefault(); openDesigner(null); };
+      if ($('sql').value.trim() === 'SELECT count(*) AS rows FROM' && ts.length) $('sql').value = `SELECT count(*) AS rows FROM ${qid(ts[0].name)}`;
     } catch (e) { $('status').innerHTML = `<b>error</b><span>${esc(e.message)}</span>`; }
   }
   // ---- console
@@ -104,12 +140,23 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
   async function run() {
     stopLive();
     try { const res = await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql: $('sql').value, params: params() }) });
-      render(res, `${res.count.toLocaleString()} row${res.count === 1 ? '' : 's'} · ${res.ms.toFixed(2)} ms${res.inTransaction ? ' · in transaction' : ''}${res.count > 1000 ? ' · showing 1,000' : ''}`); refresh();
+      render(res, `${res.count.toLocaleString()} row${res.count === 1 ? '' : 's'} · ${res.ms.toFixed(2)} ms${res.lastInsertId != null ? ' · inserted id ' + (typeof res.lastInsertId === 'number' ? res.lastInsertId.toLocaleString() : res.lastInsertId) : ''}${res.inTransaction ? ' · in transaction' : ''}${res.count > 1000 ? ' · showing 1,000' : ''}`); refresh();
     } catch (e) { showErr(e); }
   }
   function stopLive() { if (live) { live.close(); live = null; $('live').classList.remove('on'); } }
+  // A browser event stream cannot read an error response, so when one fails before its first event, ask the same URL
+  // again with fetch for the server's reason (the request fails fast with a JSON error; a working stream is not retried).
+  async function streamError(url, fallback) {
+    const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 3000);
+    try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) { const b = await r.json().catch(() => null); if (b && b.error) return { code: b.code || 'ERROR', message: b.error }; } }
+    catch (_) { return { code: 'ERROR', message: 'the server is not answering (stopped, or restarted with a new token?)' }; }
+    finally { clearTimeout(timer); }
+    return { code: 'ERROR', message: fallback };
+  }
+  const isSelect = (s) => /^\s*(select|with)\b/i.test(s);
   function startLive() {
     stopLive();
+    if (!isSelect($('sql').value)) return showErr({ code: 'LIVE', message: 'Live keeps the result of a SELECT up to date as rows change. Run INSERT, UPDATE, DELETE and CREATE with Run, then put a SELECT in the editor and click Live.' });
     let p; try { p = params(); } catch (e) { return showErr(e); }
     const url = `/api/live?sql=${encodeURIComponent($('sql').value)}&params=${encodeURIComponent(JSON.stringify(p))}&token=${encodeURIComponent(token)}`;
     let n = 0; const t0 = performance.now(); let prev = null;
@@ -120,7 +167,8 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
         if (prev) { const a = new Set(prev), b = new Set(cur); const plus = cur.filter((x) => !a.has(x)).length, minus = prev.filter((x) => !b.has(x)).length; diff = ` · last change +${plus} −${minus}`; }
         prev = cur;
         render(m, `<span class="badge live">LIVE</span> ${m.rows.length.toLocaleString()} rows · ${n} update${n === 1 ? '' : 's'} in ${((performance.now() - t0) / 1000).toFixed(0)} s${diff}`); } else if (m.type === 'overflow') { showErr({ code: 'OVERFLOW', message: 'the live query fell behind and was dropped; start it again' }); stopLive(); } };
-    live.onerror = () => { showErr({ code: 'ERROR', message: 'live stream closed (bad token, bad SQL, or the server went away)' }); stopLive(); };
+    let got = false; live.addEventListener('message', () => { got = true; });
+    live.onerror = async () => { const wasLive = live; stopLive(); if (!wasLive) return; showErr(got ? { code: 'ERROR', message: 'the live stream stopped (the server went away or was restarted)' } : await streamError(url, 'the live stream could not start')); };
     $('live').classList.add('on');
   }
   $('run').onclick = run; $('live').onclick = () => (live ? stopLive() : startLive());
@@ -130,14 +178,16 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
   let tail = null;
   $('cstart').onclick = () => {
     if (tail) { tail.close(); tail = null; $('cstart').textContent = 'Start'; $('cstart').classList.add('primary'); return; }
-    const url = `/api/changes?sql=${encodeURIComponent($('csql').value)}&token=${encodeURIComponent(token)}`; let n = 0;
+    if (!isSelect($('csql').value)) { $('cmeta').textContent = 'give a SELECT on one table; its WHERE is the filter'; return; }
+    const url = `/api/changes?sql=${encodeURIComponent($('csql').value)}&token=${encodeURIComponent(token)}`; let n = 0; let got = false;
     tail = new EventSource(url); $('cstart').textContent = 'Stop'; $('cstart').classList.remove('primary'); $('events').innerHTML = '';
     tail.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type !== 'change') { if (m.type === 'overflow') $('cmeta').textContent = 'fell behind, dropped'; return; } n++;
       const row = m.row ? m.columns.map((c, i) => `${c}=${m.row[i] === null ? 'NULL' : JSON.stringify(m.row[i])}`).join(' ') : '';
       const div = document.createElement('div'); const op = ['insert', 'update', 'delete'].includes(m.op) ? m.op : 'change';
       div.innerHTML = `<span class="badge ${op}">${op}</span><span class="k">${esc(m.table)} #${esc(m.key)}</span><span>${esc(row)}</span><span class="k">seq ${esc(m.seq)}</span>`;
       $('events').prepend(div); while ($('events').children.length > 200) $('events').lastChild.remove(); $('cmeta').textContent = `${n} events`; };
-    tail.onerror = () => { $('cmeta').textContent = 'stream closed (bad token or SQL)'; $('cstart').click(); };
+    tail.addEventListener('message', () => { got = true; });
+    tail.onerror = async () => { if (!tail) return; $('cstart').click(); const e = got ? { message: 'the stream stopped (the server went away or was restarted)' } : await streamError(url, 'the change stream could not start'); $('cmeta').textContent = e.message; };
   };
   // ---- access control
   async function acl() {
@@ -149,6 +199,133 @@ textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px
     } catch (e) { $('acl').innerHTML = `<div class="err"><b>${esc(e.code)}</b>${esc(e.message)}</div>`; }
   }
   $('aclrefresh').onclick = acl;
+  // ---- table designer: builds CREATE TABLE / ALTER TABLE from a form; shows the SQL it will run
+  let tablesCache = [], tablesKey = '';
+  const TYPES = ['INT', 'DOUBLE', 'BOOL', 'TEXT', 'BYTES', 'TIMESTAMP', 'UUID'];
+  const RESERVED = new Set('select from where order group by limit insert into values update set delete create alter drop table column index primary key unique references default not null and or in is between like as on join check user desc asc count sum min max avg case when then else end true false'.split(' '));
+  function qid(n) { return /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !RESERVED.has(n.toLowerCase()) ? n : '"' + String(n).replace(/"/g, '""') + '"'; }
+  const splitType = (t) => { const m = /^(TEXT|BYTES)\((\d+)\)$/.exec(t); return m ? [m[1], Number(m[2])] : [t, 255]; };
+  const sqlType = (c) => (c.type === 'TEXT' ? `VARCHAR(${c.size})` : c.type === 'BYTES' ? `BLOB(${c.size})` : c.type);
+  const GENERATORS = { UUID: ['uuid()', 'gen_random_uuid()'], TIMESTAMP: ['now()', 'current_timestamp'] };
+  const sized = (t) => t === 'TEXT' || t === 'BYTES';
+  const pkOf = (name) => { const t = tablesCache.find((x) => x.name.toLowerCase() === name.toLowerCase()); const c = t && t.columns.find((x) => x.pk); return c ? c.name : 'id'; };
+  const keyTypeOf = (name) => { const t = tablesCache.find((x) => x.name.toLowerCase() === name.toLowerCase()); const c = t && t.columns.find((x) => x.pk); return c ? c.type : 'INT'; };
+  const KEY_TYPES = ['INT', 'UUID'];
+  const LOCKED = 'cannot be changed once the table exists (yet)';
+  let D = null;
+  const blank = () => ({ orig: null, name: '', type: 'TEXT', size: 255, pk: false, auto: false, notnull: false, unique: false, def: '', ref: '', onDelete: 'RESTRICT', removed: false });
+  function openDesigner(name) {
+    if (name) {
+      const t = tablesCache.find((x) => x.name === name); if (!t) return;
+      D = { mode: 'alter', table: t.name, cols: t.columns.map((c) => { const [type, size] = splitType(c.type); const col = { name: c.name, type, size, pk: c.pk, auto: !!c.auto, notnull: !c.nullable, unique: c.unique, def: c.default === null || c.default === undefined ? '' : String(c.default), ref: c.references ? c.references.table : '', onDelete: c.references ? c.references.onDelete : 'RESTRICT', removed: false }; return Object.assign({ orig: Object.assign({}, col) }, col); }) };
+    } else {
+      D = { mode: 'create', table: '', cols: [Object.assign(blank(), { name: 'id', type: 'INT', pk: true, auto: true, notnull: true }), blank()] };
+    }
+    $('dtitle').textContent = D.mode === 'create' ? 'New table' : `Edit table ${D.table}`;
+    $('dname').value = D.table; $('dname').disabled = D.mode === 'alter'; $('dname').title = D.mode === 'alter' ? 'renaming a table is not supported yet' : '';
+    $('dapply').textContent = D.mode === 'create' ? 'Create table' : 'Apply changes';
+    $('derr').classList.add('hidden'); $('designer').classList.remove('hidden');
+    renderCols(); (D.mode === 'create' ? $('dname') : $('daddcol')).focus();
+  }
+  function closeDesigner() { $('designer').classList.add('hidden'); D = null; }
+  function el(tag, attrs, kids) { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) { if (v === false || v === null || v === undefined) continue; if (k === 'text') e.textContent = v; else if (k === 'value') e.value = v; else if (k === 'checked') e.checked = !!v; else e.setAttribute(k, v === true ? '' : v); } for (const k of kids || []) e.append(k); return e; }
+  function opt(v, label, sel) { const o = el('option', { value: v, text: label }); o.selected = v === sel; return o; }
+  function renderCols() {
+    const g = $('dcols'); g.textContent = '';
+    for (const h of ['Column', 'Type', 'Size', 'Key', 'Not null', 'Unique', 'Default', 'References', '']) g.append(el('div', { class: 'h', text: h }));
+    const alter = D.mode === 'alter';
+    D.cols.forEach((c, i) => {
+      const old = alter && c.orig; const lockKey = alter ? LOCKED : '';
+      const wrap = (node) => { const d = el('div', c.removed ? { class: 'gone' } : {}, [node]); return d; };
+      const name = el('input', { class: 'cname', value: c.name, 'aria-label': 'column name', placeholder: 'column', spellcheck: 'false', disabled: c.removed });
+      name.addEventListener('input', () => { c.name = name.value; update(); });
+      const typ = el('select', { 'aria-label': 'type', disabled: c.removed || c.pk && alter, title: c.pk && alter ? 'the primary key type ' + LOCKED : '' }, TYPES.map((t) => opt(t, t, c.type)));
+      typ.addEventListener('change', () => { c.type = typ.value; if (c.pk && !KEY_TYPES.includes(c.type)) c.pk = false; if (c.pk && c.type === 'UUID') { c.auto = false; if (!c.def) c.def = 'uuid()'; } if (c.pk && c.type === 'INT' && c.def === 'uuid()') c.def = ''; if (c.ref && keyTypeOf(c.ref) !== c.type) c.ref = ''; renderCols(); });
+      const size = el('input', { type: 'number', min: '1', max: '65535', value: sized(c.type) ? c.size : '', disabled: !sized(c.type) || c.removed, 'aria-label': 'size', title: 'maximum length in bytes (up to 65535)' });
+      size.addEventListener('input', () => { c.size = Number(size.value); update(); });
+      const pk = el('input', { type: 'radio', name: 'dpk', checked: c.pk, disabled: alter || c.removed, 'aria-label': 'primary key', title: alter ? 'the primary key ' + LOCKED : 'primary key (INT or UUID)' });
+      pk.addEventListener('change', () => { D.cols.forEach((x) => { x.pk = false; }); c.pk = true; if (!KEY_TYPES.includes(c.type)) c.type = 'INT'; c.notnull = true; c.unique = false; c.ref = ''; if (c.type === 'UUID' && !c.def) c.def = 'uuid()'; renderCols(); });
+      const nn = el('input', { type: 'checkbox', checked: c.notnull || c.pk, disabled: c.pk || c.removed, 'aria-label': 'not null' });
+      nn.addEventListener('change', () => { c.notnull = nn.checked; update(); });
+      const uq = el('input', { type: 'checkbox', checked: c.unique, disabled: alter || c.pk || c.removed, 'aria-label': 'unique', title: alter ? 'UNIQUE ' + LOCKED : 'one UNIQUE column per table (for now)' });
+      uq.addEventListener('change', () => { D.cols.forEach((x) => { if (x !== c) x.unique = false; }); c.unique = uq.checked; renderCols(); });
+      const def = el('input', { value: c.def, 'aria-label': 'default', disabled: (c.pk && c.type !== 'UUID') || c.type === 'BYTES' || old || c.removed, title: old ? 'changing a default ' + LOCKED : c.type === 'UUID' ? 'uuid() for a time-ordered UUID, gen_random_uuid() for a random one' : c.type === 'TIMESTAMP' ? 'now() for the insert time, or a fixed time' : '', placeholder: { INT: '0', DOUBLE: '0.0', BOOL: 'true', TEXT: 'text', TIMESTAMP: 'now()', BYTES: '', UUID: 'uuid()' }[c.type] });
+      def.addEventListener('input', () => { c.def = def.value; update(); });
+      let defCell = def;
+      if (c.pk && c.type === 'INT') {
+        const auto = el('input', { type: 'checkbox', checked: c.auto, disabled: alter || c.type !== 'INT', 'aria-label': 'automatic id', title: alter ? 'automatic ids ' + LOCKED : 'assign 1, 2, 3, … when an INSERT leaves the key out (never reused)' });
+        auto.addEventListener('change', () => { c.auto = auto.checked; update(); });
+        defCell = el('label', { class: 'muted', style: 'display:flex;gap:6px;align-items:center;font-size:12px' }, [auto, document.createTextNode('auto id')]);
+      }
+      const others = tablesCache.filter((t) => t.name !== D.table && keyTypeOf(t.name) === c.type).map((t) => t.name);
+      const ref = el('select', { 'aria-label': 'references', disabled: alter || c.pk || c.removed || !KEY_TYPES.includes(c.type), title: alter ? 'foreign keys ' + lockKey : !KEY_TYPES.includes(c.type) ? 'a foreign key column is INT or UUID, like the key it points to' : 'tables whose key is ' + c.type }, [opt('', '—', c.ref), ...others.map((t) => opt(t, t, c.ref))]);
+      if (c.ref && !others.includes(c.ref)) ref.append(opt(c.ref, c.ref, c.ref));
+      ref.addEventListener('change', () => { c.ref = ref.value; renderCols(); });
+      const act = el('select', { 'aria-label': 'on delete', disabled: alter || !c.ref || c.removed, title: 'what happens to this row when the referenced row is deleted' }, [opt('RESTRICT', 'restrict', c.onDelete), opt('CASCADE', 'cascade', c.onDelete), opt('SET NULL', 'set null', c.onDelete)]);
+      act.addEventListener('change', () => { c.onDelete = act.value; update(); });
+      if (!c.ref) act.style.visibility = 'hidden';
+      const rm = el('button', { class: 'icon', 'aria-label': c.removed ? 'keep column' : 'remove column', title: c.pk ? 'the primary key cannot be removed' : c.removed ? 'keep this column' : 'remove this column', disabled: c.pk, text: c.removed ? '↺' : '×' });
+      rm.addEventListener('click', () => { if (old) c.removed = !c.removed; else D.cols.splice(i, 1); renderCols(); });
+      const nameCell = el('div', c.removed ? { class: 'gone' } : {}, [name]); if (alter && !old) nameCell.append(el('span', { class: 'tag', text: 'new' }));
+      nameCell.style.display = 'flex'; nameCell.style.alignItems = 'center';
+      g.append(nameCell, wrap(typ), wrap(size), el('div', { class: 'c' }, [pk]), el('div', { class: 'c' }, [nn]), el('div', { class: 'c' }, [uq]), wrap(defCell), el('div', { class: 'ref' + (c.removed ? ' gone' : '') }, [ref, act]), el('div', { class: 'c' }, [rm]));
+    });
+    update();
+  }
+  function literal(c) {
+    const v = c.def.trim(); if (v === '') return null;
+    if ((GENERATORS[c.type] || []).includes(v.toLowerCase())) return v.toLowerCase();
+    if (/^[a-z_]+\(\)$/i.test(v)) throw `default for ${c.name || 'a column'}: ${v} is not available for ${c.type} (try ${(GENERATORS[c.type] || ['a value']).join(' or ')})`;
+    if (c.type === 'UUID' && !/^\{?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\}?$/i.test(v)) throw `default for ${c.name || 'a column'} must be uuid(), gen_random_uuid() or a UUID`;
+    if (c.type === 'INT') { if (!/^-?\d+$/.test(v)) throw `default for ${c.name || 'a column'} must be a whole number`; return v; }
+    if (c.type === 'DOUBLE') { if (!isFinite(Number(v))) throw `default for ${c.name || 'a column'} must be a number`; return String(Number(v)); }
+    if (c.type === 'BOOL') { if (!/^(true|false)$/i.test(v)) throw `default for ${c.name || 'a column'} must be true or false`; return v.toLowerCase(); }
+    if (c.type === 'TIMESTAMP' && !/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}(:?\d{2})?)?$/.test(v)) throw `default for ${c.name || 'a column'} must look like 2026-01-01T00:00:00Z`;
+    return "'" + v.replace(/'/g, "''") + "'";
+  }
+  function build() {
+    const live = D.cols.filter((c) => !c.removed); const names = new Set();
+    for (const c of live) { const n = c.name.trim(); if (!n) throw 'every column needs a name'; if (names.has(n.toLowerCase())) throw `two columns are named ${n}`; names.add(n.toLowerCase()); if (sized(c.type) && !(Number.isInteger(c.size) && c.size >= 1 && c.size <= 65535)) throw `size of ${n} must be between 1 and 65535`; if (c.ref && c.onDelete === 'SET NULL' && c.notnull) throw `${n}: ON DELETE SET NULL needs a column that allows NULL`; }
+    if (D.mode === 'create') {
+      const tn = $('dname').value.trim(); if (!tn) throw 'the table needs a name';
+      if (tablesCache.some((t) => t.name.toLowerCase() === tn.toLowerCase())) throw `a table named ${tn} already exists`;
+      const pks = live.filter((c) => c.pk); if (pks.length !== 1) throw 'choose one primary key column (INT or UUID)'; if (!KEY_TYPES.includes(pks[0].type)) throw 'the primary key must be INT or UUID';
+      if (live.filter((c) => c.unique).length > 1) throw 'one UNIQUE column per table (for now)';
+      const lines = live.map((c) => { let s = `  ${qid(c.name.trim())} ${sqlType(c)}`; if (c.pk) { if (c.type === 'INT') return s + ' PRIMARY KEY' + (c.auto ? ' AUTOINCREMENT' : ''); const d = literal(c); return s + ' PRIMARY KEY' + (d !== null ? ' DEFAULT ' + d : ''); } if (c.notnull) s += ' NOT NULL'; if (c.unique) s += ' UNIQUE'; const d = literal(c); if (d !== null) s += ' DEFAULT ' + d; if (c.ref) s += ` REFERENCES ${qid(c.ref)}(${qid(pkOf(c.ref))})` + (c.onDelete !== 'RESTRICT' ? ` ON DELETE ${c.onDelete}` : ''); return s; });
+      return `CREATE TABLE ${qid(tn)} (\n${lines.join(',\n')}\n)`;
+    }
+    const ops = [];
+    for (const c of D.cols.filter((x) => x.orig && x.removed)) ops.push(`DROP COLUMN ${qid(c.orig.name)}`);
+    for (const c of D.cols.filter((x) => x.orig && !x.removed)) {
+      const n = c.name.trim(); if (n !== c.orig.name) ops.push(`RENAME COLUMN ${qid(c.orig.name)} TO ${qid(n)}`);
+      if (c.type !== c.orig.type || (sized(c.type) && c.size !== c.orig.size)) ops.push(`ALTER COLUMN ${qid(n)} SET DATA TYPE ${sqlType(c)}`);
+      if (c.notnull !== c.orig.notnull && !c.pk) ops.push(`ALTER COLUMN ${qid(n)} ${c.notnull ? 'SET' : 'DROP'} NOT NULL`);
+    }
+    for (const c of D.cols.filter((x) => !x.orig)) { const d = literal(c); if (c.notnull && d === null) throw `new column ${c.name.trim()} is NOT NULL, so it needs a default for the rows that exist`; ops.push(`ADD COLUMN ${qid(c.name.trim())} ${sqlType(c)}` + (c.notnull ? ' NOT NULL' : '') + (d !== null ? ' DEFAULT ' + d : '')); }
+    if (!ops.length) throw 'no changes yet';
+    return `ALTER TABLE ${qid(D.table)}\n  ${ops.join(',\n  ')}`;
+  }
+  function update() {
+    let sql = '', problem = '';
+    try { sql = build(); } catch (e) { problem = String(e); }
+    $('dsql').textContent = sql || '—'; $('dapply').disabled = !!problem;
+    $('dhint').className = problem && problem !== 'no changes yet' ? 'muted bad' : 'muted';
+    $('dhint').textContent = problem || (D.mode === 'create' ? 'Primary key, UNIQUE and foreign keys cannot be changed later.' : 'Applied online: reads and writes continue while existing rows are copied.');
+  }
+  async function applyDesigner() {
+    let sql; try { sql = build(); } catch (e) { return update(); }
+    $('dapply').disabled = true; $('derr').classList.add('hidden');
+    try {
+      await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql }) });
+      const name = D.mode === 'create' ? $('dname').value.trim() : D.table; closeDesigner();
+      await refresh(); $('sql').value = `SELECT * FROM ${qid(name)} LIMIT 100`; showTab('console'); run();
+    } catch (e) { $('derr').innerHTML = `<b>${esc(e.code || 'ERROR')}</b>${esc(e.message)}`; $('derr').classList.remove('hidden'); $('dapply').disabled = false; }
+  }
+  $('newtable').onclick = () => openDesigner(null);
+  $('daddcol').onclick = () => { D.cols.push(blank()); renderCols(); const ins = $('dcols').querySelectorAll('input.cname'); if (ins.length) ins[ins.length - 1].focus(); };
+  $('dname').addEventListener('input', update);
+  $('dapply').onclick = applyDesigner; $('dcancel').onclick = closeDesigner; $('dclose').onclick = closeDesigner;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && D) closeDesigner(); });
   // ---- tabs, token, timers
   function showTab(name) { for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('on', b.dataset.tab === name); for (const t of ['console', 'changes', 'acl']) $('tab-' + t).classList.toggle('hidden', t !== name); if (name === 'acl') acl(); }
   for (const b of document.querySelectorAll('.tabs button')) b.onclick = () => showTab(b.dataset.tab);

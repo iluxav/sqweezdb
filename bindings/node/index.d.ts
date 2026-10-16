@@ -1,4 +1,4 @@
-/** A SQL value as JavaScript sees it: INT -> number (BigInt past 2^53), DOUBLE -> number, BOOL -> boolean, TEXT -> string, BYTES -> Buffer, TIMESTAMP -> Date, NULL -> null. */
+/** A SQL value as JavaScript sees it: INT -> number (BigInt past 2^53), DOUBLE -> number, BOOL -> boolean, TEXT and UUID -> string, BYTES -> Buffer, TIMESTAMP -> Date, NULL -> null. */
 export type Value = number | bigint | string | boolean | Buffer | Date | null;
 export type Row = Record<string, Value>;
 export type Params = Value[] | Value;
@@ -8,6 +8,8 @@ export interface RunResult {
   changes: number;
   /** Sequence number of the commit, 0 inside a transaction. */
   seq: number;
+  /** INSERT only: the primary key of the (last) inserted row — the automatic id, the one given, or a UUID string. */
+  lastInsertId?: number | string;
   /** Resolves once the commit is fsynced. Immediate when the database was opened with { durable: true }. */
   readonly durable: Promise<void>;
 }
@@ -64,11 +66,12 @@ export class Database {
 }
 
 export class SqweezError extends Error {
-  /** CONFLICT, DUPLICATE, FOREIGN_KEY, DENIED, NOT_FOUND, TYPE, ARGUMENTS, TRANSACTION, SYNTAX, SCHEMA, CONFIG, CLOSED or ERROR. */
+  /** CONFLICT, DUPLICATE, FOREIGN_KEY, DENIED, NOT_FOUND, TYPE, ARGUMENTS, TRANSACTION, SYNTAX, SCHEMA, CONFIG, PATH (the path is a file,
+   *  a non-empty directory that is not a database, or a database from a newer format), CLOSED or ERROR. */
   code: string;
 }
 
-export class RunResult { changes: number; seq: number; readonly durable: Promise<void>; }
+export class RunResult { changes: number; seq: number; lastInsertId?: number | string; readonly durable: Promise<void>; }
 
 /** A duration: '5ms', '1s', '30s', '2m', '1h', '7d', or milliseconds. */
 export type DurationLike = string | number;

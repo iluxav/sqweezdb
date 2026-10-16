@@ -1,0 +1,14 @@
+=== E47: unpredictable ids on the integer key path (1M rows, in-process) ===
+sequential 1..N: insert, 1000-row transactions                        0.40 us     2492951/s
+sequential 1..N: point read by id                                     0.27 us     3737183/s
+sequential 1..N: full scan (Int(1000000) rows)                     3749.53 us         267/s
+random 63-bit: insert, 1000-row transactions                          0.47 us     2134636/s
+random 63-bit: point read by id                                       0.24 us     4099431/s
+random 63-bit: full scan (Int(1000000) rows)                       3703.09 us         270/s
+random 53-bit (JS-safe): insert, 1000-row transactions                0.46 us     2175356/s
+random 53-bit (JS-safe): point read by id                             0.25 us     3994990/s
+random 53-bit (JS-safe): full scan (Int(1000000) rows)             3715.23 us         269/s
+    collisions while drawing 1M random 53-bit ids: 0
+keyed permutation id -> public id (check 169)                         0.00 us   316008974/s
+permute + unpermute round trip (all exact: true)                      0.01 us   131681834/s
+    public ids for 1, 2, 3: ce825fee79aec400 a4e8ca4059a7faf1 4058189a9f23fe24

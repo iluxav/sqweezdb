@@ -30,8 +30,9 @@ impl Subscription {
 }
 impl Drop for Subscription { fn drop(&mut self) { self.q.closed.store(true, Ordering::Relaxed); } }
 
-struct Sub { table: u16, preds: Vec<CPred>, policies: Vec<CPred>, q: Arc<Queue>, key: Option<(usize, i64)> }
-struct Live { prepared: Arc<Prepared>, sess: Session, params: Vec<Value>, tables: Vec<u16>, single: Option<(u16, Vec<CPred>, Vec<CPred>)>, key_col: Option<usize>, result: Vec<Vec<Value>>, keys: HashSet<i64>, dirty_since: Option<Instant>, q: Arc<Queue> }
+/// `since`: the log position when the subscription was made; it receives exactly the changes committed after it.
+struct Sub { table: u16, preds: Vec<CPred>, policies: Vec<CPred>, q: Arc<Queue>, key: Option<(usize, i64)>, since: u64 }
+struct Live { prepared: Arc<Prepared>, sess: Session, params: Vec<Value>, tables: Vec<u16>, single: Option<(u16, Vec<CPred>, Vec<CPred>)>, key_col: Option<usize>, result: Vec<Vec<Value>>, keys: HashSet<crate::table::Key>, dirty_since: Option<Instant>, q: Arc<Queue> }
 /// Subscriptions whose filter is `col = constant` on an INT column are indexed by (table, column, value): a record
 /// reaches them through one hash lookup per indexed column instead of a scan over every subscriber.
 #[derive(Default)] struct State { subs: Vec<Sub>, lives: Vec<Live>, keyed: HashMap<(u16, usize, i64), Vec<usize>>, key_cols: HashMap<u16, Vec<usize>>, general: HashMap<u16, Vec<usize>> }
@@ -42,7 +43,7 @@ impl State {
 /// it alive forever after the first subscription (E44).
 pub struct Reactor { sql: std::sync::Weak<Sql>, log: Arc<crate::table::GLog>, state: Arc<Mutex<State>>, pub debounce: Duration, pub reruns: AtomicU64, pub rerun_us: AtomicU64, pub events: AtomicU64, pub last_seq: AtomicU64, stop: Arc<AtomicBool>, thread: Mutex<Option<std::thread::JoinHandle<()>>> }
 
-fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), last_seq: 0 } }
+fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), last_seq: 0, last_insert_id: 0, last_insert_key: None } }
 /// The predicates a single-table plan applies, including the ones hidden in its access path.
 fn plan_preds(sql: &Sql, sess: &Session, sp: &SelectPlan, params: &[Value]) -> Result<Vec<CPred>, String> {
     let mut preds: Vec<Pred> = sp.preds.clone(); let sch = &sp.table.schema;
@@ -62,13 +63,16 @@ fn tables_of(sp: &SelectPlan, out: &mut Vec<u16>) {
     for p in &sp.preds { if let Expr::Set(s) | Expr::Scalar(s) = &p.rhs { tables_of(s, out); } }
     out.sort_unstable(); out.dedup();
 }
-fn key_of(row: &[Value], key_col: Option<usize>) -> Option<i64> { match (key_col, row) { (Some(c), r) => match r.get(c) { Some(Value::Int(i)) => Some(*i), _ => None }, _ => None } }
+fn key_of(row: &[Value], key_col: Option<usize>) -> Option<crate::table::Key> { match (key_col, row) { (Some(c), r) => match r.get(c) { Some(Value::Int(i)) => Some(*i as i128), Some(Value::Text(t)) => crate::table::parse_uuid(t).map(|b| crate::table::key_from_uuid(&b)), _ => None }, _ => None } }
 
 impl Reactor {
     pub fn start(sql: Arc<Sql>) -> Arc<Reactor> {
         sql.db.log.feeds.fetch_add(1, Ordering::Relaxed);  // keep the memory ring alive
         let r = Arc::new(Reactor { sql: Arc::downgrade(&sql), log: sql.db.log.clone(), thread: Mutex::new(None), state: Arc::new(Mutex::new(State::default())), debounce: sql.cfg.live.debounce, reruns: AtomicU64::new(0), rerun_us: AtomicU64::new(0), events: AtomicU64::new(0), last_seq: AtomicU64::new(0), stop: Arc::new(AtomicBool::new(false)) });
-        let r2 = r.clone(); let h = std::thread::spawn(move || r2.run()); *r.thread.lock().unwrap() = Some(h);
+        // the feed starts where the log is now, decided here rather than on the new thread: a change committed right
+        // after the first subscribe() returns must not slip in before the reactor begins reading
+        let start = sql.current_seq();
+        let r2 = r.clone(); let h = std::thread::spawn(move || r2.run(start)); *r.thread.lock().unwrap() = Some(h);
         r
     }
     /// Stop the reactor thread and wait for it (unless called from it). Subscriptions stop receiving events.
@@ -77,8 +81,8 @@ impl Reactor {
         let h = self.thread.lock().unwrap().take();
         if let Some(h) = h { if h.thread().id() != std::thread::current().id() { h.join().ok(); } }
     }
-    fn run(&self) {
-        let mut feed = { let Some(sql) = self.sql.upgrade() else { return }; sql.subscribe(sql.current_seq()) };
+    fn run(&self, start: u64) {
+        let mut feed = { let Some(sql) = self.sql.upgrade() else { return }; sql.subscribe(start) };
         loop {
             if self.stop.load(Ordering::Relaxed) { return; }
             // sleep until something is appended, or until a dirty query is due
@@ -97,11 +101,11 @@ impl Reactor {
                     else if *op == OP_DELETE { for ((tid, _, _), ix) in st.keyed.iter() { if *tid == t.id { cands.extend_from_slice(ix); } } }  // a key-only delete cannot be filtered: deliver to all
                     if let Some(g) = st.general.get(&t.id) { cands.extend_from_slice(g); }
                     if !cands.is_empty() {
-                        let pk = if is_row { t.pk_of(payload) } else { i64::from_le_bytes(payload[..8].try_into().unwrap()) };
+                        let pk = if is_row { t.pk_of(payload) } else { t.schema.key_from_bytes(&payload[..t.schema.key_width()]) };
                         let row = if is_row { Some((0..t.schema.columns.len()).map(|i| decode_col(&t.schema, payload, i)).collect()) } else { None };
-                        let ch = Arc::new(Change { seq: *seq, table: t.schema.name.clone(), op: match *op { OP_INSERT => ChangeOp::Insert, OP_UPDATE => ChangeOp::Update, _ => ChangeOp::Delete }, pk, row });
+                        let ch = Arc::new(Change { seq: *seq, table: t.schema.name.clone(), op: match *op { OP_INSERT => ChangeOp::Insert, OP_UPDATE => ChangeOp::Update, _ => ChangeOp::Delete }, pk: t.schema.key_value(pk), row });
                         for &i in &cands {
-                            let sub = &st.subs[i];
+                            let sub = &st.subs[i]; if *seq <= sub.since { continue; }
                             let pass = if is_row { sub.preds.iter().all(|p| p.eval(payload)) && sub.policies.iter().all(|p| p.eval(payload)) } else { *op == OP_DELETE };
                             if !pass { continue; }
                             if !sub.q.push(Event::Change(ch.clone())) { let _ = sub.q.push(Event::Overflow { last_seq: *seq }); sub.q.closed.store(true, Ordering::Relaxed); }
@@ -111,7 +115,7 @@ impl Reactor {
                     for live in st.lives.iter_mut() {
                         if live.dirty_since.is_some() || !live.tables.contains(&t.id) { continue; }
                         let dirty = match &live.single {
-                            Some((tid, preds, pols)) if *tid == t.id => { let pk = if is_row { t.pk_of(payload) } else { i64::from_le_bytes(payload[..8].try_into().unwrap()) }; (is_row && preds.iter().all(|p| p.eval(payload)) && pols.iter().all(|p| p.eval(payload))) || (live.key_col.is_some() && live.keys.contains(&pk)) || (!is_row && live.key_col.is_none()) }
+                            Some((tid, preds, pols)) if *tid == t.id => { let pk = if is_row { t.pk_of(payload) } else { t.schema.key_from_bytes(&payload[..t.schema.key_width()]) }; (is_row && preds.iter().all(|p| p.eval(payload)) && pols.iter().all(|p| p.eval(payload))) || (live.key_col.is_some() && live.keys.contains(&pk)) || (!is_row && live.key_col.is_none()) }
                             _ => true,
                         };
                         if dirty { live.dirty_since = Some(now); }
@@ -128,7 +132,7 @@ impl Reactor {
                 self.reruns.fetch_add(1, Ordering::Relaxed); self.rerun_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                 live.dirty_since = None;
                 if rows != live.result {
-                    let (added, removed) = match live.key_col { Some(c) => { let old: HashSet<i64> = live.keys.clone(); let new: HashSet<i64> = rows.iter().filter_map(|r| key_of(r, Some(c))).collect(); (rows.iter().filter(|r| key_of(r, Some(c)).map(|k| !old.contains(&k)).unwrap_or(true)).cloned().collect(), live.result.iter().filter(|r| key_of(r, Some(c)).map(|k| !new.contains(&k)).unwrap_or(true)).cloned().collect()) } None => (rows.clone(), live.result.clone()) };
+                    let (added, removed) = match live.key_col { Some(c) => { let old: HashSet<crate::table::Key> = live.keys.clone(); let new: HashSet<crate::table::Key> = rows.iter().filter_map(|r| key_of(r, Some(c))).collect(); (rows.iter().filter(|r| key_of(r, Some(c)).map(|k| !old.contains(&k)).unwrap_or(true)).cloned().collect(), live.result.iter().filter(|r| key_of(r, Some(c)).map(|k| !new.contains(&k)).unwrap_or(true)).cloned().collect()) } None => (rows.clone(), live.result.clone()) };
                     live.keys = rows.iter().filter_map(|r| key_of(r, live.key_col)).collect();
                     live.result = rows.clone();
                     if !live.q.push(Event::Live { seq: self.last_seq.load(Ordering::Relaxed), rows, added, removed }) { live.q.closed.store(true, Ordering::Relaxed); }
@@ -147,7 +151,7 @@ impl Reactor {
         let key = { let mut all: Vec<Pred> = sp.preds.clone(); match &sp.access { Access::Pk(e) => all.push(Pred { col: sp.table.schema.pk, cmp: Cmp::Eq, rhs: e.clone() }), Access::Index(ix, e) => all.push(Pred { col: ix.col, cmp: Cmp::Eq, rhs: e.clone() }), _ => {} }
             all.iter().find_map(|p| if p.cmp == Cmp::Eq && sp.table.schema.columns[p.col].ty == crate::table::ColType::Int { match &p.rhs { Expr::Lit(Value::Int(v)) => Some((p.col, *v)), Expr::Param(i) => match params.get(*i) { Some(Value::Int(v)) => Some((p.col, *v)), _ => None }, _ => None } } else { None }) };
         let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: sql.cfg.live.queue, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
-        { let mut st = self.state.lock().unwrap(); st.subs.push(Sub { table: sp.table.id, preds, policies, q: q.clone(), key }); st.reindex(); }
+        { let mut st = self.state.lock().unwrap(); st.subs.push(Sub { table: sp.table.id, preds, policies, q: q.clone(), key, since: sql.current_seq() }); st.reindex(); }
         Ok(Subscription { q })
     }
     /// Watch a query: returns its current result and a handle that receives `Event::Live` whenever the result changes.

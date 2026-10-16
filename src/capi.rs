@@ -84,7 +84,7 @@ pub struct Sub { s: crate::live::Subscription }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_sub_next(sub: *mut Sub, timeout_ms: c_int, out: *mut *mut Rows) -> c_int {
     let sub = unsafe { &*sub };
     match sub.s.recv_timeout(std::time::Duration::from_millis(timeout_ms.max(0) as u64)) {
-        Some(crate::live::Event::Change(c)) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), Value::Int(c.pk)]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } unsafe { *out = Box::into_raw(Box::new(Rows { rows: vec![row], strings: vec![] })); } 0 }
+        Some(crate::live::Event::Change(c)) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), c.pk.clone()]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } unsafe { *out = Box::into_raw(Box::new(Rows { rows: vec![row], strings: vec![] })); } 0 }
         Some(crate::live::Event::Overflow { .. }) => 2,
         Some(crate::live::Event::Live { .. }) => 1,
         None => 1,
@@ -93,3 +93,6 @@ pub struct Sub { s: crate::live::Subscription }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_sub_free(sub: *mut Sub) { if !sub.is_null() { drop(unsafe { Box::from_raw(sub) }); } }
 /// Take a snapshot (compaction + fast restart). Returns the number of rows written.
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_snapshot(db: *mut Db) -> i64 { unsafe { &*db }.sql.snapshot().rows as i64 }
+
+/// Primary key of the last row this session inserted (an automatic id, or the one given); 0 before any insert.
+#[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_last_insert_id(s: *mut Sess) -> i64 { if s.is_null() { 0 } else { unsafe { &*s }.s.last_insert_id } }

@@ -18,24 +18,40 @@ pub const PK_SHARDS: usize = 1024;
 pub const SEC_SHARDS: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ColType { Int, Float, Bool, Text(usize), Bytes(usize), Timestamp }
+pub enum ColType { Int, Float, Bool, Text(usize), Bytes(usize), Timestamp, Uuid }
 impl ColType {
-    pub fn width(&self) -> usize { match self { ColType::Int | ColType::Float | ColType::Timestamp => 8, ColType::Bool => 1, ColType::Text(n) | ColType::Bytes(n) => 2 + *n } }
-    pub fn name(&self) -> String { match self { ColType::Int => "INT".into(), ColType::Timestamp => "TIMESTAMP".into(), ColType::Float => "DOUBLE".into(), ColType::Bool => "BOOL".into(), ColType::Text(n) => format!("TEXT({n})"), ColType::Bytes(n) => format!("BYTES({n})") } }
+    pub fn width(&self) -> usize { match self { ColType::Int | ColType::Float | ColType::Timestamp => 8, ColType::Uuid => 16, ColType::Bool => 1, ColType::Text(n) | ColType::Bytes(n) => 2 + *n } }
+    pub fn name(&self) -> String { match self { ColType::Int => "INT".into(), ColType::Timestamp => "TIMESTAMP".into(), ColType::Uuid => "UUID".into(), ColType::Float => "DOUBLE".into(), ColType::Bool => "BOOL".into(), ColType::Text(n) => format!("TEXT({n})"), ColType::Bytes(n) => format!("BYTES({n})") } }
 }
-#[derive(Clone, Debug)] pub struct Column { pub name: String, pub ty: ColType, pub nullable: bool, pub default: Value }
+#[derive(Clone, Debug)] pub struct Column { pub name: String, pub ty: ColType, pub nullable: bool, pub default: Value, /// computed per row when the INSERT leaves the column out (`uuid()`, `now()`)
+    pub generated: Option<Gen> }
 #[derive(Clone, Debug, PartialEq)] pub enum FkAction { Restrict, Cascade, SetNull }
 /// A foreign key: `col` references the primary key of table `parent`. Enforced always (no pragma); `on_delete` says what a parent delete does.
 #[derive(Clone, Debug)] pub struct FkDef { pub col: usize, pub parent: String, pub on_delete: FkAction }
-#[derive(Clone, Debug)] pub struct Schema { pub name: String, pub columns: Vec<Column>, pub offsets: Vec<usize>, pub row_size: usize, pub pk: usize, pub unique: Option<usize>, pub null_bytes: usize, pub fks: Vec<FkDef> }
+#[derive(Clone, Debug)] pub struct Schema { pub name: String, pub columns: Vec<Column>, pub offsets: Vec<usize>, pub row_size: usize, pub pk: usize, pub unique: Option<usize>, pub null_bytes: usize, pub fks: Vec<FkDef>, /// the primary key is assigned automatically when an INSERT leaves it out
+    pub auto: bool, /// the key is a 16-byte UUID (decided once: every key read checks it)
+    pub key16: bool }
 impl Schema {
+    #[inline] pub fn key_is_uuid(&self) -> bool { self.key16 }
+    /// Bytes a key takes in log records and snapshot fences.
+    #[inline] pub fn key_width(&self) -> usize { if self.key_is_uuid() { 16 } else { 8 } }
+    #[inline] pub fn key_of(&self, row: &[u8]) -> Key { let off = self.offsets[self.pk]; if self.key16 { key_from_uuid(&row[off..off + 16]) } else { read_i64(row, off) as i128 } }
+    pub fn key_bytes(&self, k: Key) -> Vec<u8> { if self.key_is_uuid() { k.to_le_bytes().to_vec() } else { (k as i64).to_le_bytes().to_vec() } }
+    pub fn key_from_bytes(&self, b: &[u8]) -> Key { if b.len() == 16 { i128::from_le_bytes(b.try_into().unwrap()) } else { i64::from_le_bytes(b[..8].try_into().unwrap()) as i128 } }
+    pub fn key_value(&self, k: Key) -> Value { if self.key_is_uuid() { Value::Text(format_uuid(&uuid_of_key(k))) } else { Value::Int(k as i64) } }
+    pub fn key_text(&self, k: Key) -> String { if self.key_is_uuid() { format_uuid(&uuid_of_key(k)) } else { (k as i64).to_string() } }
+    pub fn key_from_value(&self, v: &Value) -> Result<Key, String> {
+        if self.key_is_uuid() { match v { Value::Text(s) => parse_uuid(s).map(|b| key_from_uuid(&b)).ok_or_else(|| format!("not a UUID: {s:?}")), Value::Bytes(b) if b.len() == 16 => Ok(key_from_uuid(b)), v => Err(format!("expected a UUID, got {v:?}")) } }
+        else { v.as_i64().map(|i| i as i128) }
+    }
     pub fn new(name: &str, columns: Vec<Column>, pk: usize, unique: Option<usize>) -> Result<Schema, String> {
-        if columns.get(pk).map(|c| &c.ty) != Some(&ColType::Int) { return Err("primary key must be an INT column".into()); }
+        if !matches!(columns.get(pk).map(|c| &c.ty), Some(ColType::Int) | Some(ColType::Uuid)) { return Err("primary key must be an INT or UUID column".into()); }
         let mut columns = columns; columns[pk].nullable = false;
         let null_bytes = (columns.len() + 7) / 8;
         let mut offsets = vec![]; let mut off = null_bytes;
         for c in &columns { offsets.push(off); off += c.ty.width(); }
-        Ok(Schema { name: name.to_string(), columns, offsets, row_size: off, pk, unique, null_bytes, fks: vec![] })
+        let key16 = columns[pk].ty == ColType::Uuid;
+        Ok(Schema { name: name.to_string(), columns, offsets, row_size: off, pk, unique, null_bytes, fks: vec![], auto: false, key16 })
     }
     pub fn col(&self, name: &str) -> Option<usize> { self.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name)) }
 }
@@ -51,6 +67,8 @@ impl Value {
 pub fn encode_value(ty: &ColType, v: &Value, out: &mut [u8]) -> Result<(), String> {
     match (ty, v) {
         (ColType::Int, Value::Int(x)) | (ColType::Timestamp, Value::Int(x)) => out[..8].copy_from_slice(&x.to_le_bytes()),
+        (ColType::Uuid, Value::Text(s)) => { let u = parse_uuid(s).ok_or_else(|| format!("not a UUID: {s:?} (expected 8-4-4-4-12 hex digits)"))?; out[..16].copy_from_slice(&u) }
+        (ColType::Uuid, Value::Bytes(b)) if b.len() == 16 => out[..16].copy_from_slice(b),
         (ColType::Timestamp, Value::Text(s)) => { let x = parse_timestamp(s).ok_or_else(|| format!("not a timestamp: {s:?} (use 2026-10-15T19:30:00Z, 2026-10-15 19:30:00 or 2026-10-15)"))?; out[..8].copy_from_slice(&x.to_le_bytes()) }
         (ColType::Float, Value::Float(x)) => out[..8].copy_from_slice(&x.to_le_bytes()),
         (ColType::Float, Value::Int(x)) => out[..8].copy_from_slice(&(*x as f64).to_le_bytes()),
@@ -60,6 +78,44 @@ pub fn encode_value(ty: &ColType, v: &Value, out: &mut [u8]) -> Result<(), Strin
         (ty, v) => return Err(format!("type mismatch: column is {}, value is {:?}", ty.name(), v)),
     }
     Ok(())
+}
+/// A UUID in its canonical text form (lowercase, 8-4-4-4-12), from 16 bytes.
+pub fn format_uuid(b: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef"; let mut s = String::with_capacity(36);
+    for (i, x) in b[..16].iter().enumerate() { if matches!(i, 4 | 6 | 8 | 10) { s.push('-'); } s.push(H[(x >> 4) as usize] as char); s.push(H[(x & 15) as usize] as char); }
+    s
+}
+/// Parse `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (any case), the same without hyphens, or either inside braces.
+pub fn parse_uuid(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim(); let s = s.strip_prefix('{').and_then(|x| x.strip_suffix('}')).unwrap_or(s);
+    let hex: Vec<u8> = if s.len() == 36 { let b = s.as_bytes(); if b[8] != b'-' || b[13] != b'-' || b[18] != b'-' || b[23] != b'-' { return None; } s.bytes().filter(|&c| c != b'-').collect() } else if s.len() == 32 { s.bytes().collect() } else { return None };
+    if hex.len() != 32 { return None; }
+    let nib = |c: u8| -> Option<u8> { match c { b'0'..=b'9' => Some(c - b'0'), b'a'..=b'f' => Some(c - b'a' + 10), b'A'..=b'F' => Some(c - b'A' + 10), _ => None } };
+    let mut out = [0u8; 16]; for i in 0..16 { out[i] = nib(hex[2 * i])? << 4 | nib(hex[2 * i + 1])?; } Some(out)
+}
+/// A value computed per row when a column is left out of an INSERT (a column default like `uuid()` or `now()`).
+#[derive(Clone, Debug, PartialEq)] pub enum Gen { /// time-ordered UUID (RFC 9562 version 7): `uuid()`
+    Uuid7, /// random UUID (version 4): `gen_random_uuid()`
+    Uuid4, /// the current time: `now()`, `CURRENT_TIMESTAMP`
+    Now }
+impl Gen { pub fn sql(&self) -> &'static str { match self { Gen::Uuid7 => "uuid()", Gen::Uuid4 => "gen_random_uuid()", Gen::Now => "now()" } } }
+pub fn gen_value(g: &Gen) -> Value { match g { Gen::Uuid7 => Value::Bytes(uuid_v7().to_vec()), Gen::Uuid4 => Value::Bytes(uuid_v4().to_vec()), Gen::Now => Value::Int(now_micros()) } }
+pub fn now_micros() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0) }
+/// Bytes from the operating system's secure random source, drawn from a per-thread buffer so a UUID costs no system call.
+fn random_fill(out: &mut [u8]) {
+    thread_local! { static BUF: std::cell::RefCell<([u8; 4096], usize)> = const { std::cell::RefCell::new(([0; 4096], 4096)) }; }
+    BUF.with(|b| { let mut b = b.borrow_mut(); for x in out.iter_mut() { if b.1 == 4096 { getrandom::fill(&mut b.0).expect("the operating system's random source failed"); b.1 = 0; } *x = b.0[b.1]; b.1 += 1; } });
+}
+pub fn uuid_v4() -> [u8; 16] { let mut u = [0u8; 16]; random_fill(&mut u); u[6] = (u[6] & 0x0f) | 0x40; u[8] = (u[8] & 0x3f) | 0x80; u }
+/// Version 7: 48 bits of Unix milliseconds, then a 12-bit counter so UUIDs made in the same millisecond still sort in
+/// creation order across all threads of this process (RFC 9562 method 1), then 62 random bits.
+pub fn uuid_v7() -> [u8; 16] {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ms = (now_micros() / 1000) as u64;
+    let prev = LAST.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |last| Some((ms << 12).max(last + 1))).unwrap();
+    let t = (ms << 12).max(prev + 1); let (ms, seq) = (t >> 12, t & 0xfff);
+    let mut u = [0u8; 16]; random_fill(&mut u[8..]);
+    u[..6].copy_from_slice(&ms.to_be_bytes()[2..8]); u[6] = 0x70 | (seq >> 8) as u8; u[7] = seq as u8; u[8] = (u[8] & 0x3f) | 0x80; u
 }
 /// TIMESTAMP values are microseconds since 1970-01-01T00:00:00Z, stored like an INT. Text forms accepted:
 /// `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS[.ffffff]]`, `YYYY-MM-DDTHH:MM[:SS[.ffffff]]`, each with an optional `Z` or `±HH:MM`.
@@ -114,10 +170,21 @@ pub fn decode_col(schema: &Schema, row: &[u8], i: usize) -> Value {
     match &schema.columns[i].ty {
         ColType::Int | ColType::Timestamp => Value::Int(read_i64(row, off)), ColType::Float => Value::Float(read_f64(row, off)), ColType::Bool => Value::Bool(row[off] != 0),
         ColType::Text(_) => Value::Text(String::from_utf8_lossy(read_bytes(row, off)).into_owned()), ColType::Bytes(_) => Value::Bytes(read_bytes(row, off).to_vec()),
+        ColType::Uuid => Value::Text(format_uuid(&row[off..off + 16])),
     }
 }
 /// Raw encoded bytes of a column (used as index key).
 #[inline] pub fn col_key<'a>(schema: &Schema, row: &'a [u8], i: usize) -> Option<&'a [u8]> { if is_null(row, i) { return None; } let off = schema.offsets[i]; Some(&row[off..off + schema.columns[i].ty.width()]) }
+/// A primary key. INT keys are themselves; UUID keys are their 16 bytes read big-endian with the top bit flipped, so
+/// key order is byte order (creation order for version 7 UUIDs).
+pub type Key = i128;
+#[inline] pub fn key_from_uuid(b: &[u8]) -> Key { (u128::from_be_bytes(b[..16].try_into().unwrap()) ^ (1u128 << 127)) as i128 }
+#[inline] pub fn uuid_of_key(k: Key) -> [u8; 16] { ((k as u128) ^ (1u128 << 127)).to_be_bytes() }
+/// Key of column `i` (INT, TIMESTAMP or UUID), or None for NULL.
+#[inline] pub fn col_key128(schema: &Schema, row: &[u8], i: usize) -> Option<Key> { if is_null(row, i) { return None; } let off = schema.offsets[i]; Some(if schema.columns[i].ty == ColType::Uuid { key_from_uuid(&row[off..off + 16]) } else { read_i64(row, off) as i128 }) }
+/// 64-bit form of a key for the hash-based secondary indexes: exact for INT keys; for UUIDs a fold, and every
+/// lookup re-checks the full key.
+#[inline] pub fn fold_key(k: Key) -> i64 { if k >= i64::MIN as i128 && k <= i64::MAX as i128 { k as i64 } else { ((k >> 64) as i64) ^ (k as i64) } }
 #[inline] pub fn read_key(schema: &Schema, row: &[u8], i: usize) -> Option<i64> { if is_null(row, i) { None } else { Some(read_i64(row, schema.offsets[i])) } }
 
 // ---------- generic group-commit log: segmented, with a catalog of DDL/ACL statements ----------
@@ -282,6 +349,27 @@ impl LogCursor {
 }
 
 /// A fixed-size array allocated in blocks of 64 on first touch: a small table costs a few kilobytes instead of the full array.
+/// One shard of the primary-key index: 64-bit keys for INT tables (half the memory, so fewer cache misses on every
+/// lookup), 128-bit keys only for UUID tables. Chosen once per table.
+pub enum PkMap { N(BTreeMap<i64, u32>), W(BTreeMap<Key, u32>) }
+impl PkMap {
+    #[inline] pub fn get(&self, k: &Key) -> Option<&u32> { match self { PkMap::N(m) => m.get(&(*k as i64)), PkMap::W(m) => m.get(k) } }
+    #[inline] pub fn contains_key(&self, k: &Key) -> bool { self.get(k).is_some() }
+    #[inline] pub fn insert(&mut self, k: Key, v: u32) -> Option<u32> { match self { PkMap::N(m) => m.insert(k as i64, v), PkMap::W(m) => m.insert(k, v) } }
+    #[inline] pub fn remove(&mut self, k: &Key) -> Option<u32> { match self { PkMap::N(m) => m.remove(&(*k as i64)), PkMap::W(m) => m.remove(k) } }
+    pub fn clear(&mut self) { match self { PkMap::N(m) => m.clear(), PkMap::W(m) => m.clear() } }
+    pub fn pairs(&self) -> Vec<(Key, u32)> { match self { PkMap::N(m) => m.iter().map(|(&k, &s)| (k as i128, s)).collect(), PkMap::W(m) => m.iter().map(|(&k, &s)| (k, s)).collect() } }
+    /// INT keys only (range scans are not offered on UUID keys).
+    pub fn range_n(&self, a: i64, b: i64) -> std::collections::btree_map::Range<'_, i64, u32> { match self { PkMap::N(m) => m.range(a..=b), PkMap::W(_) => unreachable!("range scan on a UUID key") } }
+}
+fn pk_narrow() -> RwLock<PkMap> { RwLock::new(PkMap::N(BTreeMap::new())) }
+fn pk_wide() -> RwLock<PkMap> { RwLock::new(PkMap::W(BTreeMap::new())) }
+/// Snapshot page fences, at the key's own width.
+pub enum Fence { N(Vec<i64>), W(Vec<Key>) }
+impl Fence {
+    #[inline] fn partition(&self, pk: Key) -> usize { match self { Fence::N(v) => v.partition_point(|&f| (f as i128) <= pk), Fence::W(v) => v.partition_point(|&f| f <= pk) } }
+    pub fn len(&self) -> usize { match self { Fence::N(v) => v.len(), Fence::W(v) => v.len() } }
+}
 pub struct Lazy2<T> { dir: Box<[OnceLock<Box<[T]>>]>, block: usize, len: usize, make: fn() -> T }
 impl<T> Lazy2<T> {
     pub fn new(len: usize, block: usize, make: fn() -> T) -> Lazy2<T> { Lazy2 { dir: (0..len.div_ceil(block)).map(|_| OnceLock::new()).collect(), block, len, make } }
@@ -305,15 +393,15 @@ pub struct Chunk { pub data: Option<ChunkBuf> }
 /// private mapping (row bytes, copy-on-write per page) or in the heap overlays (indexes for rows added since).
 /// `fence[p]` is the key of the first row that starts in page p of the rows region (read eagerly: 8 bytes per 4 KB
 /// page of data). A point lookup is one fence search in memory, then one page of rows.
-pub struct MappedBase { pub n: usize, rows: *const u8, rows_off: usize, stride: usize, pk_off: usize, fence: Vec<i64>, uniq: *const u64, ucap: usize, kmin: i64, kmax: i64 }
+pub struct MappedBase { pub n: usize, rows: *const u8, rows_off: usize, stride: usize, pk_off: usize, fence: Fence, uniq: *const u64, ucap: usize, kmin: Key, kmax: Key, kw: usize }
 unsafe impl Send for MappedBase {} unsafe impl Sync for MappedBase {}
 impl MappedBase {
     /// Primary key of mapped slot i, read straight from the mapping (a slot's key never changes).
-    #[inline] fn key_at(&self, i: usize) -> i64 { unsafe { std::ptr::read_unaligned(self.rows.add(i * self.stride + 16 + self.pk_off) as *const i64) } }
+    #[inline] fn key_at(&self, i: usize) -> Key { unsafe { let p = self.rows.add(i * self.stride + 16 + self.pk_off); if self.kw == 16 { key_from_uuid(std::slice::from_raw_parts(p, 16)) } else { std::ptr::read_unaligned(p as *const i64) as i128 } } }
     #[inline] fn slot_lo(&self, page: usize) -> usize { ((page * SNAP_ALIGN + self.stride - 1) / self.stride).min(self.n) }
     /// First mapped slot whose key is >= pk (n if none).
-    fn lower_bound(&self, pk: i64) -> usize {
-        let p = self.fence.partition_point(|&f| f <= pk); if p == 0 { return 0; }
+    fn lower_bound(&self, pk: Key) -> usize {
+        let p = self.fence.partition(pk); if p == 0 { return 0; }
         let (mut lo, mut hi) = (self.slot_lo(p - 1), self.slot_lo(p));
         while lo < hi { let mid = (lo + hi) / 2; if self.key_at(mid) < pk { lo = mid + 1; } else { hi = mid; } }
         lo
@@ -338,7 +426,7 @@ impl SecIndex {
 pub struct Table {
     pub id: u16, pub schema: Schema, pub stride: usize,
     chunks_: Lazy2<RwLock<Chunk>>, next_slot: AtomicU32,
-    pk_: Lazy2<RwLock<BTreeMap<i64, u32>>>, sec_: Lazy2<RwLock<UniqShard>>,
+    pk_: Lazy2<RwLock<PkMap>>, sec_: Lazy2<RwLock<UniqShard>>,
     pub indexes: RwLock<Vec<Arc<SecIndex>>>,
     pub log: Arc<GLog>, pub durable: bool,
     base: OnceLock<MappedBase>, map: OnceLock<Arc<MmapMut>>,
@@ -348,22 +436,32 @@ pub struct Table {
     pub fks: RwLock<Vec<FkLink>>, pub children: RwLock<Vec<ChildLink>>,
     /// Log sequences during which this table owned its name (for change feeds: records outside are copies or stale writes).
     pub owner_since: std::sync::atomic::AtomicU64, pub owner_until: std::sync::atomic::AtomicU64,
+    /// Highest primary key ever issued or seen (auto ids continue above it and are never reused). Shared with the
+    /// shadow table during an online ALTER so both hand out from one sequence.
+    pub next_id: Arc<std::sync::atomic::AtomicI64>,
 }
 /// The target of an online ALTER TABLE: a table with the new schema and a row converter old -> new.
 #[derive(Clone)] pub struct Shadow { pub table: Arc<Table>, pub convert: Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync> }
 impl Table { #[inline] fn base_is_some(&self) -> bool { self.base.get().is_some() } }
 impl Table {
     pub fn new(id: u16, schema: Schema, log: Arc<GLog>, durable: bool) -> Table {
+        let wide = schema.key16;
         let stride = 16 + schema.row_size;
         Table { id, schema, stride, chunks_: Lazy2::new(MAX_CHUNKS, 64, || RwLock::new(Chunk { data: None })), next_slot: AtomicU32::new(0),
-                pk_: Lazy2::new(PK_SHARDS, 64, || RwLock::new(BTreeMap::new())), sec_: Lazy2::new(SEC_SHARDS, 64, || RwLock::new(UniqShard::default())), indexes: RwLock::new(vec![]), log, durable, base: OnceLock::new(), map: OnceLock::new(), free: Mutex::new(vec![]), shadow: RwLock::new(None), retired: std::sync::atomic::AtomicBool::new(false), fks: RwLock::new(vec![]), children: RwLock::new(vec![]), owner_since: std::sync::atomic::AtomicU64::new(0), owner_until: std::sync::atomic::AtomicU64::new(u64::MAX) }
+                pk_: Lazy2::new(PK_SHARDS, 64, if wide { pk_wide } else { pk_narrow }), sec_: Lazy2::new(SEC_SHARDS, 64, || RwLock::new(UniqShard::default())), indexes: RwLock::new(vec![]), log, durable, base: OnceLock::new(), map: OnceLock::new(), free: Mutex::new(vec![]), shadow: RwLock::new(None), retired: std::sync::atomic::AtomicBool::new(false), fks: RwLock::new(vec![]), children: RwLock::new(vec![]), owner_since: std::sync::atomic::AtomicU64::new(0), owner_until: std::sync::atomic::AtomicU64::new(u64::MAX) , next_id: Arc::new(std::sync::atomic::AtomicI64::new(0)) }
     }
+    /// Use another table's id sequence (the shadow of an online ALTER shares the original's).
+    pub fn with_counter(mut self, c: Arc<std::sync::atomic::AtomicI64>) -> Table { self.next_id = c; self }
+    /// The next automatic primary key: one above the highest ever issued or seen.
+    #[inline] pub fn alloc_id(&self) -> i64 { self.next_id.fetch_add(1, Ordering::Relaxed) + 1 }
+    /// Record a key given explicitly (or replayed), so automatic ids continue above it.
+    #[inline] pub fn bump_id(&self, pk: i64) { self.next_id.fetch_max(pk, Ordering::Relaxed); }
     /// The row arena and the index shards exist only once a table is touched (an empty tenant table costs almost nothing).
     #[inline] fn chunks(&self) -> &Lazy2<RwLock<Chunk>> { &self.chunks_ }
-    #[inline] fn pk(&self) -> &Lazy2<RwLock<BTreeMap<i64, u32>>> { &self.pk_ }
+    #[inline] fn pk(&self) -> &Lazy2<RwLock<PkMap>> { &self.pk_ }
     #[inline] fn sec(&self) -> &Lazy2<RwLock<UniqShard>> { &self.sec_ }
     pub fn allocated_blocks(&self) -> (usize, usize, usize) { (self.chunks_.allocated_blocks(), self.pk_.allocated_blocks(), self.sec_.allocated_blocks()) }
-    #[inline] fn pk_shard(pk: i64) -> usize { ((pk as u64) / PK_SHARD_KEYS as u64) as usize % PK_SHARDS }
+    #[inline] fn pk_shard(pk: Key) -> usize { ((pk as u128) / PK_SHARD_KEYS as u128 % PK_SHARDS as u128) as usize }
     #[inline] fn sec_shard_h(h: u64) -> usize { (h >> 56) as usize & (SEC_SHARDS - 1) }
     /// Does this slot's row carry exactly this unique key? (reads the row; pending rows count, so claims are visible)
     fn slot_key_eq(&self, slot: u32, key: &[u8]) -> bool {
@@ -378,13 +476,13 @@ impl Table {
         let (mask, tag) = (b.ucap - 1, ((h >> 32) as u32) | 1); let mut i = (h as usize) & mask;
         loop { let e = unsafe { *b.uniq.add(i) }; if e == 0 { return None; } if (e >> 32) as u32 == tag { let s = e as u32; if self.slot_key_eq(s, key) { return Some(s); } } i = (i + 1) & mask; }
     }
-    #[inline] fn mapped_slot(&self, pk: i64) -> Option<u32> { let b = self.base.get()?; if pk < b.kmin || pk > b.kmax { return None; } let i = b.lower_bound(pk); if i < b.n && b.key_at(i) == pk { Some(i as u32) } else { None } }
+    #[inline] fn mapped_slot(&self, pk: Key) -> Option<u32> { let b = self.base.get()?; if pk < b.kmin || pk > b.kmax { return None; } let i = b.lower_bound(pk); if i < b.n && b.key_at(i) == pk { Some(i as u32) } else { None } }
     /// Ask the kernel to read a mapped chunk ahead (scans).
     #[inline] fn prefetch(&self, ck: usize) { if let (Some(b), Some(m)) = (self.base.get(), self.map.get()) { if ck < b.chunks() { let _ = m.advise_range(Advice::WillNeed, b.rows_off + ck * CHUNK_ROWS * self.stride, CHUNK_ROWS * self.stride); } } }
     #[inline] fn slot_live(&self, slot: u32) -> bool { let c = self.chunks()[slot as usize / CHUNK_ROWS].read().unwrap(); match c.data.as_ref() { Some(d) => Self::hdr_at(d, (slot as usize % CHUNK_ROWS) * self.stride) != (0, 0), None => false } }
-    #[inline] fn mapped_live(&self, pk: i64) -> bool { self.mapped_slot(pk).map(|s| self.slot_live(s)).unwrap_or(false) }
+    #[inline] fn mapped_live(&self, pk: Key) -> bool { self.mapped_slot(pk).map(|s| self.slot_live(s)).unwrap_or(false) }
     /// Slot of a primary key: the mapped base first (unless that row has since been deleted), then the heap index.
-    #[inline] pub fn pk_slot(&self, pk: i64) -> Option<u32> { if let Some(s) = self.mapped_slot(pk) { if self.slot_live(s) { return Some(s); } } self.pk()[Self::pk_shard(pk)].read().unwrap().get(&pk).copied() }
+    #[inline] pub fn pk_slot(&self, pk: Key) -> Option<u32> { if let Some(s) = self.mapped_slot(pk) { if self.slot_live(s) { return Some(s); } } self.pk()[Self::pk_shard(pk)].read().unwrap().get(&pk).copied() }
     pub fn mapped_rows(&self) -> usize { self.base.get().map(|b| b.n).unwrap_or(0) }
     /// A slot for a new row: a freed one if any, else the next fresh one.
     #[inline] fn alloc_slot(&self) -> u32 { if let Some(s) = self.free.lock().unwrap().pop() { return s; } self.next_slot.fetch_add(1, Ordering::Relaxed) }
@@ -394,34 +492,35 @@ impl Table {
     // ---- foreign keys ----
     /// Verify every non-NULL foreign key of `row` has a live parent, and return read guards on the parents' key shards so
     /// the parents cannot be deleted until the caller's write is published (parent deletes take those shards for writing).
-    pub fn fk_guards<'a>(&self, links: &'a [FkLink], row: &[u8]) -> Result<Vec<RwLockReadGuard<'a, BTreeMap<i64, u32>>>, Abort> {
-        let mut want: Vec<(usize, usize, i64, usize)> = vec![];  // (parent id, shard, key, link index)
-        for (i, l) in links.iter().enumerate() { if let Some(v) = read_key(&self.schema, row, l.col) { want.push((l.parent.id as usize, Self::pk_shard(v), v, i)); } }
+    pub fn fk_guards<'a>(&self, links: &'a [FkLink], row: &[u8]) -> Result<Vec<RwLockReadGuard<'a, PkMap>>, Abort> {
+        let mut want: Vec<(usize, usize, Key, usize)> = vec![];  // (parent id, shard, key, link index)
+        for (i, l) in links.iter().enumerate() { if let Some(v) = col_key128(&self.schema, row, l.col) { want.push((l.parent.id as usize, Self::pk_shard(v), v, i)); } }
         want.sort_unstable(); want.dedup_by_key(|w| (w.0, w.1, w.2));
         let mut guards = vec![]; let mut held: Vec<(usize, usize)> = vec![];
         for (pid, shard, v, i) in want {
             let l = &links[i];
-            if held.last() == Some(&(pid, shard)) { if l.parent.pk_slot(v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {v} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); } continue; }
+            if held.last() == Some(&(pid, shard)) { if l.parent.pk_slot(v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.key_text(v), l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); } continue; }
             let m = l.parent.pk()[shard].read().unwrap();
-            if l.parent.pk_slot_in(&m, v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {v} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); }
+            if l.parent.pk_slot_in(&m, v).is_none() { return Err(Abort::Fk(format!("foreign key violation: {}.{} = {} has no row in {}.{}", self.schema.name, self.schema.columns[l.col].name, l.parent.schema.key_text(v), l.parent.schema.name, l.parent.schema.columns[l.parent.schema.pk].name))); }
             guards.push(m); held.push((pid, shard));
         }
         Ok(guards)
     }
     /// Parent side of a delete: RESTRICT refuses while children exist; CASCADE and SET NULL return the work to do after the row is gone.
-    fn fk_children_check(&self, pk: i64) -> Result<Vec<(Arc<Table>, usize, FkAction)>, Abort> {
+    fn fk_children_check(&self, pk: Key) -> Result<Vec<(Arc<Table>, usize, FkAction)>, Abort> {
         let mut todo = vec![];
         for c in self.children.read().unwrap().iter() {
             let Some(ct) = c.table.upgrade() else { continue }; if ct.retired.load(Ordering::Relaxed) { continue; }
-            let Some(ix) = ct.index_on(c.col) else { continue }; let n = ix.count(pk); if n == 0 { continue; }
-            match c.on_delete { FkAction::Restrict => return Err(Abort::Fk(format!("delete from {} blocked: {n} row(s) in {}.{} reference {} = {pk}", self.schema.name, ct.schema.name, ct.schema.columns[c.col].name, self.schema.columns[self.schema.pk].name))), _ => todo.push((ct.clone(), c.col, c.on_delete.clone())) }
+            let Some(ix) = ct.index_on(c.col) else { continue }; let n = ix.count(fold_key(pk)); if n == 0 { continue; }
+            let n = if ct.schema.columns[c.col].ty == ColType::Uuid { ix.slots(fold_key(pk)).into_iter().filter(|&sl| ct.with_slot(sl, |_, r| col_key128(&ct.schema, r, c.col) == Some(pk)) == Some(true)).count() } else { n }; if n == 0 { continue; }
+            match c.on_delete { FkAction::Restrict => return Err(Abort::Fk(format!("delete from {} blocked: {n} row(s) in {}.{} reference {} = {}", self.schema.name, ct.schema.name, ct.schema.columns[c.col].name, self.schema.columns[self.schema.pk].name, self.schema.key_text(pk)))), _ => todo.push((ct.clone(), c.col, c.on_delete.clone())) }
         }
         Ok(todo)
     }
-    fn fk_apply(&self, pk: i64, todo: Vec<(Arc<Table>, usize, FkAction)>) -> Result<(), Abort> {
+    fn fk_apply(&self, pk: Key, todo: Vec<(Arc<Table>, usize, FkAction)>) -> Result<(), Abort> {
         for (ct, col, action) in todo {
             let Some(ix) = ct.index_on(col) else { continue };
-            let mut cpks = vec![]; for slot in ix.slots(pk) { if let Some(Some(cpk)) = ct.with_slot(slot, |_, r| if read_key(&ct.schema, r, col) == Some(pk) { Some(ct.pk_of(r)) } else { None }) { cpks.push(cpk); } }
+            let mut cpks = vec![]; for slot in ix.slots(fold_key(pk)) { if let Some(Some(cpk)) = ct.with_slot(slot, |_, r| if col_key128(&ct.schema, r, col) == Some(pk) { Some(ct.pk_of(r)) } else { None }) { cpks.push(cpk); } }
             for cpk in cpks { match action { FkAction::Cascade => { match ct.delete_by_pk(cpk) { Ok(_) | Err(Abort::NotFound) => {}, Err(e) => return Err(e) } } FkAction::SetNull => { let sch = ct.schema.clone(); match ct.update_by_pk(cpk, |r| { let mut n = r.to_vec(); encode_col(&sch, &mut n, col, &Value::Null).map_err(Abort::Type)?; Ok(n) }) { Ok(_) | Err(Abort::NotFound) => {}, Err(e) => return Err(e) } } FkAction::Restrict => {} } }
         }
         Ok(())
@@ -430,15 +529,15 @@ impl Table {
     fn shadow(&self) -> Option<Shadow> { self.shadow.read().unwrap().clone() }
     pub fn mirror_insert(&self, row: &[u8]) { if let Some(sh) = self.shadow() { if let Ok(r) = (sh.convert)(row) { let _ = sh.table.insert(&r); } } }
     pub fn mirror_update(&self, row: &[u8]) { if let Some(sh) = self.shadow() { if let Ok(r) = (sh.convert)(row) { let pk = self.pk_of(row); match sh.table.update_by_pk(pk, |_| Ok(r.clone())) { Err(Abort::NotFound) => { let _ = sh.table.insert(&r); } _ => {} } } } }
-    pub fn mirror_delete(&self, pk: i64) { if let Some(sh) = self.shadow() { let _ = sh.table.delete_by_pk(pk); } }
+    pub fn mirror_delete(&self, pk: Key) { if let Some(sh) = self.shadow() { let _ = sh.table.delete_by_pk(pk); } }
     /// Slot of a key when the caller already holds the key's shard lock.
-    #[inline] fn pk_slot_in(&self, m: &BTreeMap<i64, u32>, pk: i64) -> Option<u32> { if let Some(s) = self.mapped_slot(pk) { if self.slot_live(s) { return Some(s); } } m.get(&pk).copied() }
+    #[inline] fn pk_slot_in(&self, m: &PkMap, pk: Key) -> Option<u32> { if let Some(s) = self.mapped_slot(pk) { if self.slot_live(s) { return Some(s); } } m.get(&pk).copied() }
     /// Copy every live row into the shadow (converted). Each row is re-checked under its key's shard lock right before
     /// the insert, so a concurrent delete (which takes that lock to unpublish, then mirrors the delete) can never be
     /// undone by a stale copy; concurrent updates win because the copier only inserts and never overwrites.
     pub fn copy_into_shadow(&self, sh: &Shadow, stop: &std::sync::atomic::AtomicBool) -> Result<(u64, u64), String> {
         let (mut copied, mut skipped) = (0u64, 0u64);
-        let mut keys: Vec<i64> = Vec::with_capacity(1024);
+        let mut keys: Vec<Key> = Vec::with_capacity(1024);
         for ck in 0..self.chunk_count() {
             if stop.load(Ordering::Relaxed) { return Err("stopped".into()); }
             keys.clear();
@@ -459,9 +558,10 @@ impl Table {
         self.indexes.write().unwrap().clear(); self.free.lock().unwrap().clear(); self.next_slot.store(0, Ordering::Relaxed);
     }
     /// Diagnostics for one key: how the mapped lookup resolves it.
-    pub fn debug_lookup(&self, pk: i64) -> String {
+    pub fn debug_lookup(&self, pk: impl Into<Key>) -> String {
+        let pk: Key = pk.into();
         let b = match self.base.get() { Some(b) => b, None => return "no mapped base".into() };
-        let p = b.fence.partition_point(|&f| f <= pk); let lb = b.lower_bound(pk);
+        let p = b.fence.partition(pk); let lb = b.lower_bound(pk);
         let (lo, hi) = if p == 0 { (0, 0) } else { (b.slot_lo(p - 1), b.slot_lo(p)) };
         let hdr = self.chunks()[lb.min(b.n - 1) / CHUNK_ROWS].read().unwrap().data.as_ref().map(|d| Self::hdr_at(d, (lb.min(b.n - 1) % CHUNK_ROWS) * self.stride));
         format!("pk {pk}: n {} kmin {} kmax {} fence {} entries; page {} window [{lo},{hi}) keys [{}..{}]; lower_bound {lb} key_at {} hdr {:?}; heap {:?}", b.n, b.kmin, b.kmax, b.fence.len(), p as i64 - 1, if lo < b.n { b.key_at(lo) } else { -1 }, if hi > 0 && hi <= b.n { b.key_at(hi - 1) } else { -1 }, if lb < b.n { b.key_at(lb) } else { -1 }, hdr, self.pk()[Self::pk_shard(pk)].read().unwrap().get(&pk))
@@ -485,9 +585,9 @@ impl Table {
     }
     fn alloc<'a>(c: &'a mut Chunk, stride: usize) -> &'a mut [u8] { if c.data.is_none() { c.data = Some(match MmapOptions::new().len(CHUNK_ROWS * stride).map_anon() { Ok(m) => ChunkBuf::Anon(m), Err(_) => ChunkBuf::Heap(vec![0u8; CHUNK_ROWS * stride].into_boxed_slice()) }); } &mut **c.data.as_mut().unwrap() }
     pub fn rows_allocated(&self) -> usize { self.next_slot.load(Ordering::Relaxed) as usize }
-    #[inline] fn idx_add(&self, row: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { if let Some(k) = read_key(&self.schema, row, i.col) { i.add(k, slot); } } }
-    #[inline] fn idx_remove(&self, row: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { if let Some(k) = read_key(&self.schema, row, i.col) { i.remove(k, slot); } } }
-    #[inline] fn idx_replace(&self, old: &[u8], new: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { let (a, b) = (read_key(&self.schema, old, i.col), read_key(&self.schema, new, i.col)); if a != b { if let Some(a) = a { i.remove(a, slot); } if let Some(b) = b { i.add(b, slot); } } } }
+    #[inline] fn idx_add(&self, row: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { if let Some(k) = col_key128(&self.schema, row, i.col) { i.add(fold_key(k), slot); } } }
+    #[inline] fn idx_remove(&self, row: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { if let Some(k) = col_key128(&self.schema, row, i.col) { i.remove(fold_key(k), slot); } } }
+    #[inline] fn idx_replace(&self, old: &[u8], new: &[u8], slot: u32) { let ix = self.indexes.read().unwrap(); for i in ix.iter() { let (a, b) = (col_key128(&self.schema, old, i.col).map(fold_key), col_key128(&self.schema, new, i.col).map(fold_key)); if a != b { if let Some(a) = a { i.remove(a, slot); } if let Some(b) = b { i.add(b, slot); } } } }
     /// Drop a committed row from every index and zero its version (slot is not reused; a vacuum can compact later).
     fn unpublish(&self, slot: u32, row: &[u8]) {
         let pk = self.pk_of(row); self.pk()[Self::pk_shard(pk)].write().unwrap().remove(&pk);
@@ -495,7 +595,8 @@ impl Table {
         self.idx_remove(row, slot);
     }
     /// Autocommit delete by primary key. The log record carries only the key (8 bytes).
-    pub fn delete_by_pk(&self, pk: i64) -> Result<u64, Abort> {
+    pub fn delete_by_pk(&self, pk: impl Into<Key>) -> Result<u64, Abort> {
+        let pk: Key = pk.into();
         let has_children = !self.children.read().unwrap().is_empty();
         // with children: hold this key's shard for writing from the children check to the zeroing, so no child row can
         // be inserted against a parent that is about to vanish (child inserts hold the shard for reading meanwhile)
@@ -507,7 +608,7 @@ impl Table {
             let mut c = self.chunks()[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride);
             let (v, p) = Self::hdr_at(d, off); if v == 0 || self.pk_of(&d[off + 16..off + self.stride]) != pk { return Err(Abort::NotFound); } if p != 0 { return Err(Abort::Conflict); }
             let row = d[off + 16..off + self.stride].to_vec();
-            let seq = self.log.append_with_ring(OP_DELETE, self.id, &pk.to_le_bytes(), &row); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
+            let seq = self.log.append_with_ring(OP_DELETE, self.id, &self.schema.key_bytes(pk), &row); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
         self.log.wait_commit(seq, self.durable);
         { let mut c = self.chunks()[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride); d[off..off + 16].copy_from_slice(&[0u8; 16]); }
         match guard { Some(mut m) => { m.remove(&pk); drop(m); if let Some(k) = self.unique_key(&row) { self.uniq_remove(k, slot); } self.idx_remove(&row, slot); } None => self.unpublish(slot, &row) }
@@ -516,9 +617,9 @@ impl Table {
         self.fk_apply(pk, todo)?;
         Ok(seq)
     }
-    /// Idempotent replay of a delete record (payload: the 8-byte key; older logs carried the whole row).
+    /// Idempotent replay of a delete record (payload: the key, 8 or 16 bytes; older logs and transactions carry the row).
     pub fn replay_delete(&self, seq: u64, payload: &[u8]) {
-        let pk = if payload.len() == 8 { i64::from_le_bytes(payload.try_into().unwrap()) } else { self.pk_of(payload) };
+        let pk = if payload.len() == self.schema.key_width() { self.schema.key_from_bytes(payload) } else { self.pk_of(payload) };
         let slot = match self.pk_slot(pk) { Some(s) => s, None => return };
         let (ck, off) = (slot as usize / CHUNK_ROWS, (slot as usize % CHUNK_ROWS) * self.stride);
         let stored: Option<Vec<u8>> = { let mut c = self.chunks()[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride); let (v, _) = Self::hdr_at(d, off); if v == 0 || v >= seq || self.pk_of(&d[off + 16..off + self.stride]) != pk { None } else { let r = d[off + 16..off + self.stride].to_vec(); d[off..off + 16].copy_from_slice(&[0u8; 16]); Some(r) } };
@@ -527,20 +628,21 @@ impl Table {
     pub fn index_on(&self, col: usize) -> Option<Arc<SecIndex>> { self.indexes.read().unwrap().iter().find(|i| i.col == col).cloned() }
     /// Create a non-unique index on an INT column: publish it first (writers maintain it from now on), then backfill.
     pub fn create_index(&self, name: &str, col: usize) -> Result<Arc<SecIndex>, String> {
-        if !matches!(self.schema.columns[col].ty, ColType::Int | ColType::Timestamp) { return Err("only INT and TIMESTAMP columns can be indexed (for now)".into()); }
+        if !matches!(self.schema.columns[col].ty, ColType::Int | ColType::Timestamp | ColType::Uuid) { return Err("only INT, TIMESTAMP and UUID columns can be indexed (for now)".into()); }
         if self.index_on(col).is_some() { return Err(format!("column {} already has an index", self.schema.columns[col].name)); }
         let ix = Arc::new(SecIndex::new(name, col));
         self.indexes.write().unwrap().push(ix.clone());
-        let off = self.schema.offsets[col];
         for ck in 0..self.chunk_count() {
             let c = self.chunks()[ck].read().unwrap();
-            if let Some(d) = c.data.as_ref() { for i in 0..CHUNK_ROWS { let o = i * self.stride; if u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) > 0 { ix.add(read_i64(&d[o + 16..o + self.stride], off), (ck * CHUNK_ROWS + i) as u32); } } }
+            if let Some(d) = c.data.as_ref() { for i in 0..CHUNK_ROWS { let o = i * self.stride; if u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) > 0 { if let Some(k) = col_key128(&self.schema, &d[o + 16..o + self.stride], col) { ix.add(fold_key(k), (ck * CHUNK_ROWS + i) as u32); } } } }
         }
         Ok(ix)
     }
     /// Rows for one key of a non-unique index (committed rows only).
-    pub fn index_lookup<F: FnMut(&[u8]) -> bool>(&self, ix: &SecIndex, key: i64, mut f: F) {
-        ix.with_slots(key, |slots| { for &slot in slots { if self.with_slot(slot, |_, r| f(r)) == Some(false) { return; } } });
+    pub fn index_lookup<F: FnMut(&[u8]) -> bool>(&self, ix: &SecIndex, key: impl Into<Key>, mut f: F) {
+        let key: Key = key.into(); let col = ix.col;
+        // the index is keyed by a 64-bit fold: re-check the full key (a no-op for INT columns, which fold exactly)
+        ix.with_slots(fold_key(key), |slots| { for &slot in slots { if self.with_slot(slot, |_, r| if col_key128(&self.schema, r, col) == Some(key) { f(r) } else { true }) == Some(false) { return; } } });
     }
     pub fn set_rows_allocated(&self, n: u32) { self.next_slot.store(n, Ordering::Relaxed); }
     /// Direct committed load into a given slot (snapshot restore), maintaining the indexes.
@@ -554,6 +656,7 @@ impl Table {
     /// Idempotent replay of a durable record: insert if the key is new, overwrite if the stored version is older.
     pub fn replay_record(&self, seq: u64, row: &[u8]) {
         let pk = self.pk_of(row);
+        if self.schema.auto { self.bump_id(pk as i64); }
         let slot = self.pk_slot(pk);
         match slot {
             None => { let slot = self.alloc_slot(); self.load_committed_at(slot, row, seq); }
@@ -567,9 +670,9 @@ impl Table {
         }
     }
     /// Every (key, slot) the table knows, in key order: heap index entries (sorted) merged with the mapped keys.
-    fn ordered_slots(&self) -> Vec<(i64, u32)> {
-        let mut heap: Vec<(i64, u32)> = Vec::new();
-        for sh in self.pk() { let m = sh.read().unwrap(); heap.extend(m.iter().map(|(&k, &s)| (k, s))); }
+    fn ordered_slots(&self) -> Vec<(Key, u32)> {
+        let mut heap: Vec<(Key, u32)> = Vec::new();
+        for sh in self.pk() { let m = sh.read().unwrap(); heap.extend(m.pairs()); }
         heap.sort_unstable();
         let (nk, key) = match self.base.get() { Some(b) => (b.n, Some(b)), None => (0, None) };
         let keys = |j: usize| key.unwrap().key_at(j);
@@ -584,10 +687,10 @@ impl Table {
     /// Snapshot of this table in slot layout, sorted by primary key: [version u64][0 u64][row] per committed row,
     /// zero-padded to whole chunks; then the page fence; then the unique-key table ([tag u32][slot u32], 2x capacity).
     /// Each region starts at a 4096-byte boundary. Returns (rows, min pending seq, max version, [rows, fence, uniq] offsets, ucap, fence entries, kmin, kmax).
-    pub fn snapshot_table(&self, w: &mut BufWriter<File>) -> (u64, u64, u64, [u64; 3], u64, u64, i64, i64) {
+    pub fn snapshot_table(&self, w: &mut BufWriter<File>) -> (u64, u64, u64, [u64; 3], u64, u64, Key, Key) {
         fn align(w: &mut BufWriter<File>) -> u64 { let pos = w.stream_position().unwrap(); let pad = (SNAP_ALIGN as u64 - pos % SNAP_ALIGN as u64) % SNAP_ALIGN as u64; w.write_all(&vec![0u8; pad as usize]).unwrap(); pos + pad }
         let (mut n, mut min_pending, mut max_v) = (0u64, u64::MAX, 0u64);
-        let mut fence: Vec<i64> = Vec::new(); let mut ukeys: Vec<(u64, u32)> = Vec::new(); let (mut kmin, mut kmax) = (i64::MAX, i64::MIN);
+        let mut fence: Vec<Key> = Vec::new(); let mut ukeys: Vec<(u64, u32)> = Vec::new(); let (mut kmin, mut kmax) = (Key::MAX, Key::MIN);
         let u = self.schema.unique;
         let rows_off = align(w);
         let mut cur = usize::MAX; let mut guard: Option<RwLockReadGuard<Chunk>> = None;
@@ -605,7 +708,8 @@ impl Table {
         drop(guard);
         let pad_rows = (CHUNK_ROWS - n as usize % CHUNK_ROWS) % CHUNK_ROWS; w.write_all(&vec![0u8; pad_rows * self.stride]).unwrap();
         let fence_off = align(w);
-        for k in &fence { w.write_all(&k.to_le_bytes()).unwrap(); }
+        let wide = self.schema.key_is_uuid();
+        for &k in &fence { if wide { w.write_all(&k.to_le_bytes()).unwrap(); } else { w.write_all(&(k as i64).to_le_bytes()).unwrap(); } }   // 8 bytes per fence key for INT tables, as before
         let uniq_off = align(w);
         let ucap = if u.is_some() && n > 0 { (2 * n as usize).next_power_of_two().max(16) } else { 0 };
         if ucap > 0 {
@@ -617,11 +721,12 @@ impl Table {
         (n, min_pending, max_v, [rows_off, fence_off, uniq_off], ucap as u64, fence.len() as u64, kmin, kmax)
     }
     /// Restart: point chunks [0, n) at the private mapping of the snapshot file and install the mapped indexes.
-    pub fn attach_base(&self, map: Arc<MmapMut>, base: *mut u8, n: usize, offs: [u64; 3], ucap: usize, fence: Vec<i64>, kmin: i64, kmax: i64) {
+    pub fn attach_base(&self, map: Arc<MmapMut>, base: *mut u8, n: usize, offs: [u64; 3], ucap: usize, fence: Fence, kmin: Key, kmax: Key) {
         if n == 0 { return; }
+        if self.schema.auto { self.bump_id(kmax as i64); }
         let nchunks = (n + CHUNK_ROWS - 1) / CHUNK_ROWS;
         for ck in 0..nchunks { let mut c = self.chunks()[ck].write().unwrap(); c.data = Some(ChunkBuf::Mapped(unsafe { base.add(offs[0] as usize + ck * CHUNK_ROWS * self.stride) }, CHUNK_ROWS * self.stride)); }
-        let _ = self.base.set(MappedBase { n, rows: unsafe { base.add(offs[0] as usize) }, rows_off: offs[0] as usize, stride: self.stride, pk_off: self.schema.offsets[self.schema.pk], fence, uniq: unsafe { base.add(offs[2] as usize) } as *const u64, ucap, kmin, kmax });
+        let _ = self.base.set(MappedBase { n, rows: unsafe { base.add(offs[0] as usize) }, rows_off: offs[0] as usize, stride: self.stride, pk_off: self.schema.offsets[self.schema.pk], fence, uniq: unsafe { base.add(offs[2] as usize) } as *const u64, ucap, kmin, kmax, kw: self.schema.key_width() });
         let _ = self.map.set(map);
         self.next_slot.store(n as u32, Ordering::Relaxed);
     }
@@ -631,11 +736,11 @@ impl Table {
         if ixs.is_empty() { return; }
         for ck in 0..self.chunk_count() {
             self.prefetch(ck + 1); let c = self.chunks()[ck].read().unwrap();
-            if let Some(d) = c.data.as_ref() { for i in 0..CHUNK_ROWS { let o = i * self.stride; if u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) > 0 { let row = &d[o + 16..o + self.stride]; for ix in &ixs { if let Some(k) = read_key(&self.schema, row, ix.col) { ix.add(k, (ck * CHUNK_ROWS + i) as u32); } } } } }
+            if let Some(d) = c.data.as_ref() { for i in 0..CHUNK_ROWS { let o = i * self.stride; if u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) > 0 { let row = &d[o + 16..o + self.stride]; for ix in &ixs { if let Some(k) = col_key128(&self.schema, row, ix.col) { ix.add(fold_key(k), (ck * CHUNK_ROWS + i) as u32); } } } } }
         }
     }
     pub fn chunk_count(&self) -> usize { (self.rows_allocated() / CHUNK_ROWS + 1).min(MAX_CHUNKS) }
-    #[inline] pub fn pk_of(&self, row: &[u8]) -> i64 { read_i64(row, self.schema.offsets[self.schema.pk]) }
+    #[inline] pub fn pk_of(&self, row: &[u8]) -> Key { self.schema.key_of(row) }
     #[inline] pub fn unique_key<'a>(&self, row: &'a [u8]) -> Option<&'a [u8]> { self.schema.unique.and_then(|u| col_key(&self.schema, row, u)) }
 
     pub fn insert(&self, row: &[u8]) -> Result<u64, Abort> {
@@ -675,7 +780,8 @@ impl Table {
         let version = u64::from_le_bytes(d[off..off + 8].try_into().unwrap());
         if version > 0 { Some(f(version, &d[off + 16..off + self.stride])) } else { None }
     }
-    pub fn with_pk<T>(&self, pk: i64, f: impl FnOnce(&[u8]) -> T) -> Option<T> {
+    pub fn with_pk<T>(&self, pk: impl Into<Key>, f: impl FnOnce(&[u8]) -> T) -> Option<T> {
+        let pk: Key = pk.into();
         let slot = self.pk_slot(pk)?;
         self.with_slot(slot, |_, r| if self.pk_of(r) == pk { Some(f(r)) } else { None }).flatten()
     }
@@ -686,7 +792,8 @@ impl Table {
     }
     pub fn get_by_pk(&self, pk: i64) -> Option<Vec<u8>> { self.with_pk(pk, |r| r.to_vec()) }
 
-    pub fn update_by_pk(&self, pk: i64, f: impl FnOnce(&[u8]) -> Result<Vec<u8>, Abort>) -> Result<u64, Abort> {
+    pub fn update_by_pk(&self, pk: impl Into<Key>, f: impl FnOnce(&[u8]) -> Result<Vec<u8>, Abort>) -> Result<u64, Abort> {
+        let pk: Key = pk.into();
         let slot = match self.pk_slot(pk) { Some(s) => s, None => return Err(Abort::NotFound) };
         let (ver, row) = self.with_slot(slot, |v, r| (v, r.to_vec())).ok_or(Abort::NotFound)?;
         if self.pk_of(&row) != pk { return Err(Abort::NotFound); }
@@ -735,12 +842,12 @@ impl Table {
         let mut cur = usize::MAX; let mut guard: Option<RwLockReadGuard<Chunk>> = None;
         let base = self.base.get();
         for k in lo.max(0) / PK_SHARD_KEYS..=hi.max(0) / PK_SHARD_KEYS {
-            let (a, b) = ((k * PK_SHARD_KEYS).max(lo), ((k + 1) * PK_SHARD_KEYS - 1).min(hi));
+            let (a, b) = ((k * PK_SHARD_KEYS).max(lo) as Key, ((k + 1) * PK_SHARD_KEYS - 1).min(hi) as Key);
             let m = self.pk()[(k as usize) % PK_SHARDS].read().unwrap();
-            let mut heap = m.range(a..=b).peekable();
+            let mut heap = m.range_n(a as i64, b as i64).peekable();
             let (mut mi, mend) = match base { Some(bs) => (bs.lower_bound(a), bs.lower_bound(b.saturating_add(1))), None => (0, 0) };
             loop {
-                let hk = heap.peek().map(|(k, _)| **k);
+                let hk = heap.peek().map(|(k, _)| **k as i128);
                 let mk = if mi < mend { Some(base.unwrap().key_at(mi)) } else { None };
                 let (slot, key) = match (mk, hk) {
                     (None, None) => break,
@@ -765,10 +872,63 @@ pub struct Database {
 }
 #[derive(Debug, Default)] pub struct SnapStats { pub rows: u64, pub bytes: u64, pub low_water: u64, pub secs: f64, pub deleted_segments: usize }
 #[derive(Debug, Default)] pub struct RecStats { pub snap_rows: u64, pub snap_secs: f64, pub catalog: usize, pub replayed: u64, pub skipped: u64, pub replay_secs: f64, pub segments: usize, pub low_water: u64 }
+/// The file that marks a directory as one sqweezdb database and records the layout version of its files.
+pub const META_FILE: &str = "sqweezdb.meta";
+/// Directory format this build writes and reads. Bump it when the files in a database directory change incompatibly.
+pub const DIR_FORMAT: u32 = 1;
+
+/// What `check_dir` found.
+#[derive(Debug, PartialEq)]
+pub enum DirState { /// a database with its marker
+    Database, /// database files without a marker (created before markers existed); adopted on open
+    Unmarked, /// nothing there yet (missing, or empty apart from hidden files and .toml files)
+    Empty }
+
+/// Decide whether `dir` may be opened as a database, before anything is written to it. A path that is a file, a
+/// non-empty directory that is not a database, and a marker from a newer format are refused.
+pub fn check_dir(dir: &Path) -> Result<DirState, String> {
+    let shown = dir.display();
+    match fs::metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DirState::Empty),
+        Err(e) => return Err(format!("{shown}: {e}")),
+        Ok(m) if !m.is_dir() => return Err(format!("{shown} is a file; a sqweezdb database is a directory (give the path of a new or existing database directory)")),
+        Ok(_) => {}
+    }
+    if let Some(format) = read_meta(dir)? {
+        if format > DIR_FORMAT { return Err(format!("{shown} was written by a newer sqweezdb (directory format {format}; this build reads up to {DIR_FORMAT}); upgrade sqweezdb to open it")); }
+        return Ok(DirState::Database);
+    }
+    if dir.join("snap").exists() || !GLog::list_segments(dir).is_empty() { return Ok(DirState::Unmarked); }
+    let foreign: Vec<String> = fs::read_dir(dir).map_err(|e| format!("{shown}: {e}"))?.flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && !n.ends_with(".toml"))
+        .collect();
+    if foreign.is_empty() { return Ok(DirState::Empty); }
+    let mut sample: Vec<&str> = foreign.iter().map(|s| s.as_str()).take(3).collect(); sample.sort();
+    Err(format!("{shown} is not a sqweezdb database and is not empty (it holds {}{}); open a new or empty directory, e.g. {}/db", sample.join(", "), if foreign.len() > 3 { format!(" and {} more", foreign.len() - 3) } else { String::new() }, shown))
+}
+/// The directory format recorded in `dir`'s marker, or None when there is no marker.
+pub fn read_meta(dir: &Path) -> Result<Option<u32>, String> {
+    let p = dir.join(META_FILE);
+    let text = match fs::read_to_string(&p) { Ok(t) => t, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(e) => return Err(format!("{}: {e}", p.display())) };
+    let v: toml::Value = toml::from_str(&text).map_err(|e| format!("{} is unreadable: {e}", p.display()))?;
+    let f = v.get("format").and_then(|f| f.as_integer()).ok_or_else(|| format!("{} has no format number", p.display()))?;
+    u32::try_from(f).map(Some).map_err(|_| format!("{} has an invalid format number {f}", p.display()))
+}
+/// Write the marker if it is missing (written to a temporary file and renamed, so it is never half there).
+pub fn write_meta_if_missing(dir: &Path) -> std::io::Result<()> {
+    let p = dir.join(META_FILE); if p.exists() { return Ok(()); }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0);
+    let text = format!("# Every file in this directory belongs to one sqweezdb database. Copy, move or delete the directory as a whole.\nformat = {DIR_FORMAT}\ncreated_by = \"sqweezdb {}\"\ncreated_at = \"{}\"\n", env!("CARGO_PKG_VERSION"), format_timestamp(now));
+    let tmp = dir.join(format!(".{META_FILE}.tmp")); fs::write(&tmp, text)?; fs::rename(&tmp, &p)
+}
+
 impl Database {
     /// Open (or create) a database directory. Nothing is replayed here; see `recover`. The committer starts on `start`.
+    /// Writes the directory marker if it is missing; `check_dir` decides beforehand whether the directory may be used.
     pub fn open(dir: &Path, durable: bool) -> Database {
         fs::create_dir_all(dir).unwrap();
+        let _ = write_meta_if_missing(dir);   // best effort here: a read-only follower of another directory may not write
         Database { dir: dir.to_path_buf(), log: Arc::new(GLog::new(dir)), durable, tables: RwLock::new(vec![]), names: RwLock::new(HashMap::new()) }
     }
     pub fn start(&self) { { let mut s = self.log.st.lock().unwrap(); s.started = true; s.running = true; s.idle_exit = None; } self.log.spawn_threads(); }
@@ -779,6 +939,14 @@ impl Database {
         let mut names = self.names.write().unwrap(); let mut tables = self.tables.write().unwrap();
         let key = schema.name.to_lowercase();
         if names.contains_key(&key) { return Err(format!("table {} already exists", schema.name)); }
+        // check the foreign keys before the table exists: a table registered and then refused would keep its id in
+        // memory without a logged CREATE, and every later table would replay under a different id after a restart
+        for fk in &schema.fks {
+            let parent = names.get(&fk.parent.to_lowercase()).and_then(|&i| tables.get(i)).ok_or(format!("foreign key on {}.{} references unknown table {}", schema.name, schema.columns[fk.col].name, fk.parent))?;
+            let want = if parent.schema.key_is_uuid() { ColType::Uuid } else { ColType::Int };
+            if schema.columns[fk.col].ty != want { return Err(format!("foreign key column {}.{} must be {} to match the key of {}", schema.name, schema.columns[fk.col].name, want.name(), parent.schema.name)); }
+            if fk.on_delete == FkAction::SetNull && !schema.columns[fk.col].nullable { return Err(format!("ON DELETE SET NULL needs a nullable column: {}.{}", schema.name, schema.columns[fk.col].name)); }
+        }
         let t = Arc::new(Table::new(tables.len() as u16, schema, self.log.clone(), self.durable));
         t.owner_since.store(self.log.st.lock().unwrap().seq + 1, Ordering::Relaxed);
         names.insert(key, tables.len()); tables.push(t.clone());
@@ -786,11 +954,13 @@ impl Database {
         self.link_fks(&t)?;
         Ok(t)
     }
-    /// Resolve a table's foreign keys: the parent must exist, the column must be INT; the child column gets an index.
+    /// Resolve a table's foreign keys: the parent must exist, the column must have the parent's key type (INT or UUID);
+    /// the child column gets an index.
     fn link_fks(&self, t: &Arc<Table>) -> Result<(), String> {
         for fk in t.schema.fks.clone() {
             let parent = self.table(&fk.parent).ok_or(format!("foreign key on {}.{} references unknown table {}", t.schema.name, t.schema.columns[fk.col].name, fk.parent))?;
-            if t.schema.columns[fk.col].ty != ColType::Int { return Err(format!("foreign key column {}.{} must be INT", t.schema.name, t.schema.columns[fk.col].name)); }
+            let want = if parent.schema.key_is_uuid() { ColType::Uuid } else { ColType::Int };
+            if t.schema.columns[fk.col].ty != want { return Err(format!("foreign key column {}.{} must be {} to match the key of {}", t.schema.name, t.schema.columns[fk.col].name, want.name(), parent.schema.name)); }
             if fk.on_delete == FkAction::SetNull && !t.schema.columns[fk.col].nullable { return Err(format!("ON DELETE SET NULL needs a nullable column: {}.{}", t.schema.name, t.schema.columns[fk.col].name)); }
             let index = match t.index_on(fk.col) { Some(ix) => ix, None => t.create_index(&format!("fk_{}_{}", t.schema.name, t.schema.columns[fk.col].name), fk.col)? };
             t.fks.write().unwrap().push(FkLink { col: fk.col, parent: parent.clone(), on_delete: fk.on_delete.clone(), index });
@@ -803,7 +973,7 @@ impl Database {
     pub fn alter_start(&self, name: &str, schema: Schema, convert: Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>) -> Result<(Arc<Table>, Arc<Table>), String> {
         let old = self.table(name).ok_or(format!("no such table {name}"))?;
         if old.shadow.read().unwrap().is_some() { return Err(format!("table {name} already has a schema change in progress")); }
-        let shadow = { let mut names = self.names.write().unwrap(); let mut tables = self.tables.write().unwrap(); let t = Arc::new(Table::new(tables.len() as u16, schema, self.log.clone(), self.durable)); t.owner_since.store(u64::MAX, Ordering::Relaxed); names.insert(format!("\u{0}alter:{}", name.to_lowercase()), tables.len()); tables.push(t.clone()); t };
+        let shadow = { let mut names = self.names.write().unwrap(); let mut tables = self.tables.write().unwrap(); let t = Arc::new(Table::new(tables.len() as u16, schema, self.log.clone(), self.durable).with_counter(old.next_id.clone())); t.owner_since.store(u64::MAX, Ordering::Relaxed); names.insert(format!("\u{0}alter:{}", name.to_lowercase()), tables.len()); tables.push(t.clone()); t };
         self.link_fks(&shadow)?;
         *old.shadow.write().unwrap() = Some(Shadow { table: shadow.clone(), convert });
         Ok((old, shadow))
@@ -851,10 +1021,14 @@ impl Database {
             rows += n; min_pending = min_pending.min(mp);
             let here = w.stream_position().unwrap(); w.seek(SeekFrom::Start(dir_pos + (SNAP_HDR * ti) as u64)).unwrap();
             let mut h = Vec::with_capacity(SNAP_HDR);
-            h.extend_from_slice(&tb.id.to_le_bytes()); h.extend_from_slice(&0u16.to_le_bytes()); h.extend_from_slice(&(tb.schema.row_size as u32).to_le_bytes());
+            // offset 2: key width (0 = 8-byte keys, as in older snapshots)
+            h.extend_from_slice(&tb.id.to_le_bytes()); h.extend_from_slice(&(if tb.schema.key_is_uuid() { 16u16 } else { 0u16 }).to_le_bytes()); h.extend_from_slice(&(tb.schema.row_size as u32).to_le_bytes());
             h.extend_from_slice(&n.to_le_bytes()); h.extend_from_slice(&(tb.stride as u32).to_le_bytes()); h.extend_from_slice(&0u32.to_le_bytes());
             h.extend_from_slice(&ucap.to_le_bytes()); h.extend_from_slice(&max_v.to_le_bytes()); for o in offs { h.extend_from_slice(&o.to_le_bytes()); }
-            h.extend_from_slice(&fence_n.to_le_bytes()); h.extend_from_slice(&kmin.to_le_bytes()); h.extend_from_slice(&kmax.to_le_bytes()); h.resize(SNAP_HDR, 0);
+            h.extend_from_slice(&fence_n.to_le_bytes()); h.extend_from_slice(&(kmin as i64).to_le_bytes()); h.extend_from_slice(&(kmax as i64).to_le_bytes());
+            h.extend_from_slice(&tb.next_id.load(Ordering::Relaxed).to_le_bytes());   // offset 88: highest id issued, so deleted ids are not reused after a restart
+            h.extend_from_slice(&((kmin >> 64) as i64).to_le_bytes()); h.extend_from_slice(&((kmax >> 64) as i64).to_le_bytes());   // offsets 96/104: high halves (16-byte keys)
+            h.resize(SNAP_HDR, 0);
             w.write_all(&h).unwrap(); w.seek(SeekFrom::Start(here)).unwrap();
         }
         let low_water = (s0 + 1).min(min_pending);
@@ -906,11 +1080,15 @@ impl Database {
                 let h = &dir[SNAP_HDR * ti..SNAP_HDR * (ti + 1)];
                 let rd = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().unwrap());
                 let (id, row_size, n, stride, ucap, max_v) = (u16::from_le_bytes(h[..2].try_into().unwrap()), u32::from_le_bytes(h[4..8].try_into().unwrap()) as usize, rd(8) as usize, u32::from_le_bytes(h[16..20].try_into().unwrap()) as usize, rd(24) as usize, rd(32));
-                let (fence_n, kmin, kmax) = (rd(64) as usize, rd(72) as i64, rd(80) as i64);
+                let wide = u16::from_le_bytes(h[2..4].try_into().unwrap()) == 16;
+                let join = |lo: u64, hi: u64| -> Key { if wide { ((hi as i128) << 64) | lo as i128 } else { lo as i64 as i128 } };
+                let (fence_n, kmin, kmax) = (rd(64) as usize, join(rd(72), rd(96)), join(rd(80), rd(104)));
                 let tb = self.table_by_id(id).ok_or(format!("snapshot refers to unknown table {id}"))?;
+                if tb.schema.auto { tb.bump_id(rd(88) as i64); }   // zero in snapshots written before auto ids existed
                 if tb.schema.row_size != row_size || tb.stride != stride { return Err(format!("snapshot row size mismatch for table {}", tb.schema.name)); }
-                let mut fence = vec![0i64; fence_n];
-                if fence_n > 0 { f.seek(SeekFrom::Start(rd(48))).map_err(|e| e.to_string())?; f.read_exact(unsafe { std::slice::from_raw_parts_mut(fence.as_mut_ptr() as *mut u8, fence_n * 8) }).map_err(|e| e.to_string())?; }
+                let kw = if wide { 16 } else { 8 }; let mut raw = vec![0u8; fence_n * kw];
+                if fence_n > 0 { f.seek(SeekFrom::Start(rd(48))).map_err(|e| e.to_string())?; f.read_exact(&mut raw).map_err(|e| e.to_string())?; }
+                let fence = if wide { Fence::W(raw.chunks_exact(16).map(|c| i128::from_le_bytes(c.try_into().unwrap())).collect()) } else { Fence::N(raw.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()) };
                 tb.attach_base(mm.clone(), base, n, [rd(40), rd(48), rd(56)], ucap, fence, kmin, kmax);
                 tb.backfill_indexes();
                 max_seq = max_seq.max(max_v); st.snap_rows += n as u64;
@@ -953,14 +1131,15 @@ impl TxnWrite {
     fn slot(&self) -> u32 { match self { TxnWrite::Insert { slot, .. } | TxnWrite::Update { slot, .. } | TxnWrite::Delete { slot, .. } => *slot } }
     fn op(&self) -> u8 { match self { TxnWrite::Insert { .. } => OP_INSERT, TxnWrite::Update { .. } => OP_UPDATE, TxnWrite::Delete { .. } => OP_DELETE } }
 }
-pub struct Txn { pub id: u64, pub writes: Vec<TxnWrite>, pub reads: Vec<(Arc<Table>, u32, u64)>, by_key: HashMap<(u16, i64), usize> }
-impl Txn { pub fn new() -> Txn { Txn { id: TXN_IDS.fetch_add(1, Ordering::Relaxed), writes: vec![], reads: vec![], by_key: HashMap::new() } } }
+pub struct Txn { pub id: u64, pub writes: Vec<TxnWrite>, pub reads: Vec<(Arc<Table>, u32, u64)>, by_key: crate::util::TxnKeyMap }
+impl Txn { pub fn new() -> Txn { Txn { id: TXN_IDS.fetch_add(1, Ordering::Relaxed), writes: vec![], reads: vec![], by_key: Default::default() } } }
 impl Default for Txn { fn default() -> Self { Self::new() } }
 
 impl Table {
     #[inline] fn hdr_at(d: &[u8], off: usize) -> (u64, u64) { (u64::from_le_bytes(d[off..off + 8].try_into().unwrap()), u64::from_le_bytes(d[off + 8..off + 16].try_into().unwrap())) }
     /// Read inside a transaction: own writes first, then committed state (recorded for validation).
-    pub fn txn_get(self: &Arc<Self>, txn: &mut Txn, pk: i64) -> Option<Vec<u8>> {
+    pub fn txn_get(self: &Arc<Self>, txn: &mut Txn, pk: impl Into<Key>) -> Option<Vec<u8>> {
+        let pk: Key = pk.into();
         if let Some(&i) = txn.by_key.get(&(self.id, pk)) { return match &txn.writes[i] { TxnWrite::Delete { .. } => None, w => Some(w.row().clone()) }; }
         let slot = self.pk_slot(pk)?;
         let (v, row) = self.with_slot(slot, |v, r| (v, r.to_vec()))?;
@@ -968,7 +1147,8 @@ impl Table {
         txn.reads.push((self.clone(), slot, v));
         Some(row)
     }
-    pub fn txn_delete(self: &Arc<Self>, txn: &mut Txn, pk: i64) -> Result<(), Abort> {
+    pub fn txn_delete(self: &Arc<Self>, txn: &mut Txn, pk: impl Into<Key>) -> Result<(), Abort> {
+        let pk: Key = pk.into();
         if let Some(&i) = txn.by_key.get(&(self.id, pk)) {
             match &txn.writes[i] {
                 TxnWrite::Delete { .. } => return Err(Abort::NotFound),
@@ -994,7 +1174,8 @@ impl Table {
         txn.writes.push(TxnWrite::Insert { table: self.clone(), row: row.to_vec(), slot: 0 });
         Ok(())
     }
-    pub fn txn_update(self: &Arc<Self>, txn: &mut Txn, pk: i64, f: impl FnOnce(&[u8]) -> Result<Vec<u8>, Abort>) -> Result<(), Abort> {
+    pub fn txn_update(self: &Arc<Self>, txn: &mut Txn, pk: impl Into<Key>, f: impl FnOnce(&[u8]) -> Result<Vec<u8>, Abort>) -> Result<(), Abort> {
+        let pk: Key = pk.into();
         if let Some(&i) = txn.by_key.get(&(self.id, pk)) {
             if matches!(txn.writes[i], TxnWrite::Delete { .. }) { return Err(Abort::NotFound); }
             let new = f(txn.writes[i].row())?;

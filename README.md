@@ -16,12 +16,18 @@ in your process and a directory on disk. No server to run, unless you want one.
   writers and tops out near 2,000 with a sync per commit.
 - **Reads that scale.** Readers never take a lock. A point read costs about 0.4 µs in-process; 4
   threads read 21 million rows per second while writers run.
-- **Enforced types.** `INT`, `DOUBLE`, `BOOL`, `TEXT(n)`, `BYTES(n)`, `TIMESTAMP`. A text value in an
+- **Enforced types.** `INT`, `DOUBLE`, `BOOL`, `TEXT(n)`, `BYTES(n)`, `TIMESTAMP`, `UUID`. A text value in an
   integer column is rejected, not stored.
+- **Automatic ids and UUIDs.** `id SERIAL PRIMARY KEY` (or `AUTOINCREMENT`, `GENERATED AS IDENTITY`) hands out
+  1, 2, 3, … and never reuses a number, even after the highest row is deleted and the database restarts.
+  `DEFAULT uuid()` gives time-ordered UUIDs (version 7), `gen_random_uuid()` random ones, `DEFAULT now()`
+  the insert time. A UUID can be the primary key: `id UUID PRIMARY KEY DEFAULT uuid()`.
+  `INSERT … RETURNING` and `lastInsertId` give the new values back.
 - **Access control in the engine.** Roles, users, per-table grants and row policies compiled into
   every query and every subscription. A tenant cannot see another tenant's rows, or their changes.
 - **Online schema changes.** `ALTER TABLE` adds, drops, renames or retypes a column while readers and
-  writers keep running. Prepared statements re-plan themselves.
+  writers keep running. The statement returns when the change is in place, or with an error and nothing
+  changed (a value that does not convert to the new type, for example). Prepared statements re-plan themselves.
 - **Foreign keys always on**, with `RESTRICT`, `CASCADE` and `SET NULL`.
 - **Reactivity.** Subscribe to the changes any single-table `SELECT` would see, or watch any query and
   receive its new result when it changes. Events reach a Node callback about 15 µs after the commit.
@@ -66,20 +72,20 @@ import { open } from 'sqweezdb'
 
 const db = open('./data')   // creates or reopens; one engine per path per process; see Configuration for options
 
-db.exec(`CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT NOT NULL,
-                             amount DOUBLE, placed_at TIMESTAMP)`)
+db.exec(`CREATE TABLE orders(id SERIAL PRIMARY KEY, public_id UUID UNIQUE DEFAULT uuid(),
+                             user_id INT NOT NULL, amount DOUBLE, placed_at TIMESTAMP DEFAULT now())`)
 
-const r = db.run('INSERT INTO orders VALUES (?,?,?,?)', [1, 42, 9.5, new Date()])
+const r = db.run('INSERT INTO orders (user_id, amount) VALUES (?, ?)', [42, 9.5])
+r.lastInsertId                        // 1: the automatic id
 await r.durable                       // optional: resolves after the fsync
+db.get('INSERT INTO orders (user_id, amount) VALUES (?, ?) RETURNING id, public_id', [42, 12])
+// { id: 2, public_id: '01a145c7-a2bb-7001-862a-a205073c0824' }
 
 db.get('SELECT * FROM orders WHERE id = ?', [1])
-// { id: 1, user_id: 42, amount: 9.5, placed_at: 2026-10-15T19:30:00.000Z }
+// { id: 1, public_id: '01a145c7-…', user_id: 42, amount: 9.5, placed_at: 2026-10-15T19:30:00.000Z }
 
-const place = db.transaction((tx, userId, amount) => {
-  const next = tx.get('SELECT max(id) AS m FROM orders').m + 1
-  tx.run('INSERT INTO orders VALUES (?,?,?,?)', [next, userId, amount, new Date()])
-  return next
-})
+const place = db.transaction((tx, userId, amount) =>
+  tx.run('INSERT INTO orders (user_id, amount) VALUES (?, ?)', [userId, amount]).lastInsertId)
 place(42, 12)                         // write conflicts are retried inside
 
 for await (const ev of db.subscribe('SELECT * FROM orders WHERE user_id = ?', [42])) {
@@ -179,6 +185,33 @@ first and exists for tests and experiments.
 `sqweezdb_rows_all`, `sqweezdb_subscribe`, ...). The Go binding in `bindings/go/sqweezdb/sqweezdb.go`
 doubles as its reference; the declarations are in its cgo preamble.
 
+## The data directory
+
+A database is a directory, and the directory's name is the database's name: `open('./data/orders')`
+and `open('./data/users')` are two databases side by side. Everything inside belongs to that one
+database, so copy, move, back up or delete it as a whole:
+
+```
+data/orders/
+  sqweezdb.meta   marks the directory as a database and records its file-format version
+  snap            the table image the next start maps into memory
+  log.000…        the change log, in segments; old segments are deleted after a snapshot
+  .lock           held while the database is open; a second owner is refused
+```
+
+It is several files on purpose: the log is appended and retired segment by segment, and a snapshot
+is written beside the old one and swapped in with a rename, so space comes back without a VACUUM and
+a crash mid-snapshot damages nothing.
+
+Opening a path follows four rules, checked before anything is written:
+
+- a directory with `sqweezdb.meta` opens, unless the marker comes from a newer, incompatible format;
+- a missing or empty directory becomes a new database (with `create: false` it is refused); hidden
+  files and `.toml` files do not count, so a configuration file can live there;
+- a directory holding database files but no marker (made by 0.1.0) is adopted and gets its marker;
+- anything else is refused with the error code `PATH`: a regular file, or a non-empty directory that
+  is not a database. `open('.')` in a project root fails instead of scattering log files there.
+
 ## The `sqweezdb` command and the web console
 
 ```sh
@@ -188,7 +221,9 @@ sqweezdb shell db.internal:7781 --token …   # the same over TCP against a runn
 ```
 
 `serve` owns a directory, starts whatever the configuration asks for (socket, TCP, backup, snapshot
-policy) and, with `--ui`, a web console: tables and schema, a SQL console with a **Live** toggle that
+policy) and, with `--ui`, a web console: tables and schema, a **+** button and an edit button on each
+table that open a form to create or change a table (it shows the SQL it will run, and locks what the
+engine cannot change after creation: the primary key, UNIQUE and foreign keys), a SQL console with a **Live** toggle that
 turns any query into a result that updates as rows change, a change tail for any filter, the status
 of the log, the snapshot policy and the bucket, users, roles, grants and row policies, and a snapshot
 button. It is one HTML page compiled into the binary and a small JSON API, no framework and no build
@@ -288,12 +323,19 @@ What the policies do, measured in E42 on the lab machine:
 
 Supported today:
 
-- Tables with an `INTEGER PRIMARY KEY`, `NOT NULL`, `DEFAULT`, one `UNIQUE` column, `CREATE INDEX`
-  on `INT` and `TIMESTAMP` columns, `FOREIGN KEY ... REFERENCES ... ON DELETE RESTRICT | CASCADE | SET NULL`.
+- Tables with an `INT` primary key (optionally automatic: `SERIAL`, `AUTOINCREMENT`, `GENERATED AS IDENTITY`)
+  or a `UUID` primary key (usually `DEFAULT uuid()`), `NOT NULL`,
+  `DEFAULT` (a constant, `uuid()`, `gen_random_uuid()`, `now()`), one `UNIQUE` column, `CREATE INDEX`
+  on `INT`, `TIMESTAMP` and `UUID` columns, `FOREIGN KEY ... REFERENCES ... ON DELETE RESTRICT | CASCADE | SET NULL`
+  (the column's type matches the parent's key: `INT` for an `INT` key, `UUID` for a `UUID` key).
 - `SELECT` with `WHERE` (`=`, `<`, `>`, `<=`, `>=`, `AND`, `IN`, `NOT IN`, `IS NULL`, `BETWEEN`),
   `GROUP BY` one column with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `ORDER BY` one column with `LIMIT`,
   equality `JOIN` across any number of tables, scalar, `IN`, `EXISTS` and correlated subqueries, aliases.
-- `INSERT`, `UPDATE ... WHERE id = ?` (by primary key), `DELETE ... WHERE ...`,
+- `INSERT ... VALUES (...), (...)` (several rows, all or none), `DEFAULT` as a value, `NULL` for a generated key,
+  `RETURNING` with column names or `*`. With a column list, the columns left out take their defaults
+  (`INSERT INTO accounts (name) VALUES ('ilya')`); without one, every column needs a value, `DEFAULT` included
+  (`INSERT INTO accounts VALUES (DEFAULT, 'ilya')`), as in SQLite and Postgres;
+  `UPDATE ... WHERE id = ?` (by primary key), `DELETE ... WHERE ...`,
   `BEGIN` / `COMMIT` / `ROLLBACK` with optimistic conflict detection.
 - `ALTER TABLE ... ADD | DROP | RENAME COLUMN`, `ALTER COLUMN ... TYPE`, `SET | DROP NOT NULL`, all online.
 - `CREATE ROLE`, `CREATE USER ... IN ROLE ... [WITH attr = value]`, `GRANT ... ON table TO role`,
@@ -302,9 +344,45 @@ Supported today:
 
 Not yet: `OR`, `LIKE`, `DISTINCT`, `HAVING`, arithmetic or functions inside expressions,
 variable-length text (every text column has a maximum), multi-column indexes, indexes on text
-columns, `UPDATE` by anything other than the primary key, `DROP TABLE`, `RIGHT` and `FULL` joins,
-views, triggers. Reads inside an open transaction see committed data, not the transaction's own
-writes. A table holds at most 16.7 million rows.
+columns, `UPDATE` by anything other than the primary key, `INSERT ... SELECT`, `DROP TABLE`, `RIGHT`
+and `FULL` joins, views, triggers. A correlated subquery joins on `INT`/`TIMESTAMP` or `UUID` columns,
+and a correlated `IN (subquery)` not on `UUID` ones (use `EXISTS` or a join). Reads inside an open
+transaction see committed data, not the transaction's own writes. A table holds at most 16.7 million
+rows. Accepted but not enforced yet (to be refused until they are): a second `UNIQUE` column, `CHECK`,
+and `TEXT`/`BYTES` wider than 65,535 bytes.
+
+### INT or UUID keys
+
+```sql
+CREATE TABLE accounts (id UUID PRIMARY KEY DEFAULT uuid(), name VARCHAR(64));
+CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT uuid(),
+                     account_id UUID NOT NULL REFERENCES accounts(id), amount DOUBLE);
+
+INSERT INTO accounts (name) VALUES ('alice') RETURNING id;   -- '01a145fe-2334-7000-884d-285c8eaa5c58'
+SELECT a.name, count(*) FROM orders o JOIN accounts a ON a.id = o.account_id GROUP BY a.name;
+```
+
+A UUID key is written and read as text. `lastInsertId` is that text, where an `INT` key gives a number.
+`uuid()` makes version 7 UUIDs: random enough that nobody can guess the next one, and ordered by
+creation time, so new rows go to the end of the key order like an increasing number does. They do
+reveal when a row was created; `gen_random_uuid()` makes version 4 UUIDs, which reveal nothing.
+
+A UUID key costs more than an `INT` key: 16 bytes instead of 8 in every row, index and foreign key,
+and more time per operation. Measured in E48, with 1 million rows per table:
+
+| | `INT` key | `UUID` key |
+|---|---|---|
+| Insert | 0.40 µs | 0.58 µs |
+| Insert with a foreign key check | 0.67 µs | 1.07 µs |
+| Point read by key | 0.27 µs | 0.50 µs |
+| Join one row by key | 0.93 µs | 1.18 µs |
+| Join all 1M orders to their users | 16 ms | 74 ms |
+| Delete by key | 0.50 µs | 0.72 µs |
+| Restart from snapshot | 90 ms | 87 ms |
+
+Use `INT` when ids stay inside your system and speed matters most. Use `UUID` when ids are shown to
+users, appear in URLs, or are created by clients before they reach the database. Either way, checking
+who may read a row protects it; an id that is hard to guess does not.
 
 ## How it works, briefly
 

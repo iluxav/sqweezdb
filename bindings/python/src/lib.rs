@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
     fn next<'py>(&self, py: Python<'py>, timeout_ms: u64) -> PyResult<Option<Bound<'py, PyTuple>>> {
         let ev = py.detach(|| self.s.recv_timeout(std::time::Duration::from_millis(timeout_ms)));
         match ev {
-            Some(sqweezdb::live::Event::Change(c)) => { let mut cells: Vec<Bound<'py, PyAny>> = vec![to_py(py, &Value::Int(match c.op { sqweezdb::sql::ChangeOp::Insert => 1, sqweezdb::sql::ChangeOp::Update => 2, sqweezdb::sql::ChangeOp::Delete => 3 }))?, to_py(py, &Value::Text(c.table.clone()))?, to_py(py, &Value::Int(c.pk))?]; if let Some(r) = &c.row { for v in r { cells.push(to_py(py, v)?); } } Ok(Some(PyTuple::new(py, cells)?)) }
+            Some(sqweezdb::live::Event::Change(c)) => { let mut cells: Vec<Bound<'py, PyAny>> = vec![to_py(py, &Value::Int(match c.op { sqweezdb::sql::ChangeOp::Insert => 1, sqweezdb::sql::ChangeOp::Update => 2, sqweezdb::sql::ChangeOp::Delete => 3 }))?, to_py(py, &Value::Text(c.table.clone()))?, to_py(py, &c.pk.clone())?]; if let Some(r) = &c.row { for v in r { cells.push(to_py(py, v)?); } } Ok(Some(PyTuple::new(py, cells)?)) }
             Some(sqweezdb::live::Event::Overflow { .. }) => Err(pyo3::exceptions::PyRuntimeError::new_err("subscription fell behind and was dropped; resubscribe")),
             _ => Ok(None),
         }
@@ -60,6 +60,8 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
     fn snapshot(&self) -> u64 { self.sql.snapshot().rows }
 }
 #[pymethods] impl PySess {
+    /// Primary key of the last row this session inserted (an automatic id, or the one given); 0 before any insert.
+    #[getter] fn last_insert_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> { match self.s.lock().unwrap().last_insert_key.clone() { Some(v) => to_py(py, &v), None => Ok(py.None().into_bound(py)) } }
     fn login(&self, user: &str) -> PyResult<()> { self.sql.login(&mut self.s.lock().unwrap(), user).map_err(pyo3::exceptions::PyPermissionError::new_err) }
     /// Execute a prepared statement with a sequence of parameters; returns a list of tuples.
     #[pyo3(signature = (stmt, params = None))]

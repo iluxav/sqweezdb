@@ -1,0 +1,11 @@
+=== E48: primary-key paths with INT keys (1M rows, in-process) ===
+insert users, 1000-row transactions                                0.386 us/op     2589648/s
+insert orders (foreign key checked), 1000-row transactions         0.623 us/op     1605117/s
+point read by primary key                                          0.257 us/op     3891928/s
+range count of 1000 keys                                           4.998 us/op      200078/s
+join order -> user through the foreign key, by order key           0.835 us/op     1197656/s
+full join of 1M orders to users (Int(1000000) rows)            15582.060 us/op          64/s
+delete by primary key, autocommit                                  0.492 us/op     2034018/s
+delete user, cascading to its orders                               1.513 us/op      661139/s
+restart replaying the log                                          529.4 ms (users Int(980000) = Int(980000), orders Int(882000) = Int(882000))
+restart from the snapshot                                           77.4 ms; reads from the mapped snapshot 0.315 us (294000 hits)

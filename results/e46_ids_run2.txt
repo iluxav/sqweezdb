@@ -1,0 +1,23 @@
+=== E46: automatic ids and UUIDs (1M rows, in-process, not durable) ===
+ours: explicit id, 1 thread                                                   0.44 us/row     2250199 rows/s
+ours: automatic id, 1 thread                                                  0.43 us/row     2312993 rows/s
+    automatic ids issued: count Int(1000000), min Int(1), max Int(1000000) (expect 1000000, 1, 1000000)
+ours: explicit id, 8 writers, autocommit                                      0.66 us/row     1521990 rows/s
+ours: automatic id, 8 writers, autocommit                                     0.67 us/row     1483080 rows/s
+    8 writers: Int(400000) rows, max id Int(400000) (no gaps, no duplicates)
+ours: explicit id, 64 writers, autocommit                                     0.63 us/row     1591895 rows/s
+ours: automatic id, 64 writers, autocommit                                    0.67 us/row     1489580 rows/s
+    64 writers: Int(400000) rows, max id Int(400000) (no gaps, no duplicates)
+ours: automatic id + UNIQUE UUID by uuid() (v7, time-ordered), 1 thread       0.70 us/row     1438145 rows/s
+ours: point read by id                                                        0.24 us/row     4134572 rows/s
+ours: point read by UUID (text parameter, unique index)                       0.62 us/row     1616759 rows/s
+ours: read by UUID without an index (full scan of 1M rows)                 4400.05 us/row         227 rows/s
+ours: automatic id + UNIQUE UUID by gen_random_uuid() (v4, random), 1 thread    0.66 us/row     1508566 rows/s
+SQLite: INTEGER PRIMARY KEY given as NULL (automatic), 1 thread               0.20 us/row     5003543 rows/s
+SQLite: + UNIQUE 16-byte UUID v7 made by the application                      0.62 us/row     1620333 rows/s
+SQLite: point read by id                                                      0.70 us/row     1419515 rows/s
+SQLite: point read by UUID (16-byte BLOB, UNIQUE index)                       1.22 us/row      819250 rows/s
+uuid_v7() alone (check 90)                                                    0.05 us/row    20313510 rows/s
+uuid_v4() alone (check 67)                                                    0.04 us/row    26463863 rows/s
+uuid_v7() on 8 threads at once (one shared ordering counter)                  0.02 us/row    51135123 rows/s
+    8 threads x 250k v7 UUIDs: 2000000 distinct of 2000000; example 01a145c6-3cfc-7240-9d82-ae5bd276666b

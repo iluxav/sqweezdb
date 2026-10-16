@@ -103,7 +103,7 @@ pub fn open(path: String, options: Option<String>) -> Result<Db> {
     fn sql(&self) -> Result<Arc<Sql>> { self.sql.lock().unwrap().clone().ok_or_else(|| err_code("CLOSED", "database is closed")) }
     #[napi] pub fn prepare(&self, text: String) -> Result<Stmt> {
         let sql = self.sql()?; let p = sql.prepare(&text).map_err(err)?; let cols = sql.columns(&p);
-        let kind = match &p.plan { sql::Plan::Select(_) => 1, sql::Plan::Insert { .. } | sql::Plan::Update { .. } => 2, sql::Plan::Delete { .. } => 3, _ => 0 };
+        let kind = match &p.plan { sql::Plan::Select(_) => 1, sql::Plan::Insert { .. } => 4, sql::Plan::Update { .. } => 2, sql::Plan::Delete { .. } => 3, _ => 0 };
         Ok(Stmt { p, cols, kind })
     }
     #[napi] pub fn session(&self) -> Result<Sess> { Ok(Sess { sql: Arc::downgrade(&self.sql()?), s: Arc::new(Mutex::new(Session::default())) }) }
@@ -116,12 +116,16 @@ pub fn open(path: String, options: Option<String>) -> Result<Db> {
 #[napi] impl Stmt {
     #[napi] pub fn columns(&self) -> Vec<String> { self.cols.iter().map(|(n, _)| n.clone()).collect() }
     #[napi] pub fn kind(&self) -> u32 { self.kind as u32 }
+    /// Rows one execution writes: the number of VALUES rows of an INSERT, 1 otherwise.
+    #[napi] pub fn rows_per_run(&self) -> u32 { match &self.p.plan { sql::Plan::Insert { rows, .. } => rows.len() as u32, _ => 1 } }
 }
 #[napi] impl Sess {
     fn sql(&self) -> Result<Arc<Sql>> { self.sql.upgrade().ok_or_else(|| err_code("CLOSED", "database is closed")) }
     #[napi] pub fn login(&self, user: String) -> Result<()> { self.sql()?.login(&mut self.s.lock().unwrap(), &user).map_err(err) }
     #[napi] pub fn in_txn(&self) -> bool { self.s.lock().unwrap().txn.is_some() }
     #[napi] pub fn last_seq(&self) -> f64 { self.s.lock().unwrap().last_seq as f64 }
+    /// The key of the last inserted row: a number, or a UUID string for UUID-keyed tables.
+    #[napi(ts_return_type = "number | string | null")] pub fn last_insert_id(&self, env: Env) -> Result<JsUnknown> { match self.s.lock().unwrap().last_insert_key.clone() { Some(v) => to_js(&env, &v, None), None => Ok(env.get_null()?.into_unknown()) } }
     #[napi(ts_return_type = "Array<Record<string, unknown>>")] pub fn all(&self, env: Env, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<JsObject> {
         let vals = params(args)?; let rows = self.sql()?.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?; rows_arr(&env, &stmt.cols, &rows)
     }
@@ -174,7 +178,7 @@ fn start_push(sql: Arc<Sql>, sub: sqweezdb::live::Subscription, cols: Arc<Cols>,
                 o.set_named_property("type", env.create_string("change")?)?;
                 o.set_named_property("op", env.create_string(match c.op { ChangeOp::Insert => "insert", ChangeOp::Update => "update", ChangeOp::Delete => "delete" })?)?;
                 o.set_named_property("table", env.create_string(&c.table)?)?;
-                o.set_named_property("key", env.create_double(c.pk as f64)?)?;
+                o.set_named_property("key", to_js(&env, &c.pk, None)?)?;
                 o.set_named_property("seq", env.create_double(c.seq as f64)?)?;
                 match &c.row {
                     Some(r) => { let tc = table_cols.entry(c.table.clone()).or_insert_with(|| sql2.upgrade().and_then(|q| q.db.table(&c.table)).map(|t| t.schema.columns.iter().map(|col| (col.name.clone(), Some(col.ty.clone()))).collect()).unwrap_or_default()); o.set_named_property("row", row_obj(&env, tc, r)?)?; }

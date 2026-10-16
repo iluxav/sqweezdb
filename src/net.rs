@@ -191,7 +191,7 @@ impl Server {
                     let Some(ev) = sub.recv_timeout(std::time::Duration::from_millis(200)) else { if weak.strong_count() == 0 { return Ok(()); } continue };
                     out.clear();
                     match ev {
-                        crate::live::Event::Change(c) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), Value::Int(c.pk)]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } encode_result(&mut out, &Ok(vec![row])); }
+                        crate::live::Event::Change(c) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), c.pk.clone()]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } encode_result(&mut out, &Ok(vec![row])); }
                         crate::live::Event::Overflow { last_seq } => encode_result(&mut out, &Err(format!("subscription overflow at {last_seq}; resubscribe"))),
                         crate::live::Event::Live { .. } => continue,
                     }

@@ -143,7 +143,11 @@ fn api_sql(sql: &Sql, sess: &mut Session, body: &[u8]) -> J {
     let params: Vec<Value> = v.get("params").and_then(|p| p.as_array()).map(|a| a.iter().map(j_to_value).collect()).unwrap_or_default();
     let t = Instant::now();
     match sql.query(sess, &text, &params) {
-        Ok((cols, rows)) => json!({ "columns": names(&cols), "types": cols.iter().map(|(_, t)| t.as_ref().map(|t| t.name())).collect::<Vec<_>>(), "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "count": rows.len(), "ms": t.elapsed().as_secs_f64() * 1e3, "inTransaction": sess.txn.is_some() }),
+        Ok((cols, rows)) => {
+            let mut v = json!({ "columns": names(&cols), "types": cols.iter().map(|(_, t)| t.as_ref().map(|t| t.name())).collect::<Vec<_>>(), "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "count": rows.len(), "ms": t.elapsed().as_secs_f64() * 1e3, "inTransaction": sess.txn.is_some() });
+            if text.trim_start().get(..6).map(|w| w.eq_ignore_ascii_case("INSERT")).unwrap_or(false) { v["lastInsertId"] = sess.last_insert_key.as_ref().map(|k| value_json(k, None)).unwrap_or(J::Null); }
+            v
+        }
         Err(e) => err_json(e),
     }
 }
@@ -152,7 +156,11 @@ fn api_tables(sql: &Sql) -> J {
     J::Array(sql.db.table_names().iter().filter_map(|n| {
         let t = sql.db.table(n)?;
         let rows = sql.exec_s(&mut sess, &format!("SELECT count(*) FROM {n}"), &[]).ok().and_then(|r| r.first().and_then(|r| r.first()).and_then(|v| if let Value::Int(i) = v { Some(*i) } else { None })).unwrap_or(-1);
-        Some(json!({ "name": t.schema.name, "rows": rows, "columns": t.schema.columns.iter().enumerate().map(|(i, c)| json!({"name": c.name, "type": c.ty.name(), "nullable": c.nullable, "pk": i == t.schema.pk, "unique": t.schema.unique == Some(i)})).collect::<Vec<_>>(), "foreignKeys": t.schema.fks.len() }))
+        Some(json!({ "name": t.schema.name, "rows": rows, "columns": t.schema.columns.iter().enumerate().map(|(i, c)| {
+            let fk = t.schema.fks.iter().find(|f| f.col == i).map(|f| json!({"table": f.parent, "onDelete": match f.on_delete { crate::table::FkAction::Restrict => "RESTRICT", crate::table::FkAction::Cascade => "CASCADE", crate::table::FkAction::SetNull => "SET NULL" }}));
+            let default = match &c.generated { Some(g) => json!(g.sql()), None => value_json(&c.default, Some(&c.ty)) };
+            json!({"name": c.name, "type": c.ty.name(), "nullable": c.nullable, "pk": i == t.schema.pk, "auto": i == t.schema.pk && t.schema.auto, "unique": t.schema.unique == Some(i), "default": default, "references": fk})
+        }).collect::<Vec<_>>(), "foreignKeys": t.schema.fks.len() }))
     }).collect())
 }
 fn api_status(sql: &Sql) -> J {
@@ -201,7 +209,7 @@ fn stream_events(weak: &std::sync::Weak<Sql>, sess: &Session, req: &Req, mut w: 
             Some(Event::Live { seq, rows, added, removed }) => send(&mut w, json!({"type": "rows", "seq": seq, "columns": names(&cols), "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "added": added.len(), "removed": removed.len()}))?,
             Some(Event::Change(c)) => {
                 let tc = table_cols.entry(c.table.clone()).or_insert_with(|| weak.upgrade().and_then(|s| s.db.table(&c.table)).map(|t| t.schema.columns.iter().map(|col| (col.name.clone(), Some(col.ty.clone()))).collect()).unwrap_or_default());
-                send(&mut w, json!({"type": "change", "op": match c.op { ChangeOp::Insert => "insert", ChangeOp::Update => "update", ChangeOp::Delete => "delete" }, "table": c.table, "key": c.pk, "seq": c.seq, "columns": names(tc), "row": c.row.as_ref().map(|r| row_json(tc, r))}))?
+                send(&mut w, json!({"type": "change", "op": match c.op { ChangeOp::Insert => "insert", ChangeOp::Update => "update", ChangeOp::Delete => "delete" }, "table": c.table, "key": value_json(&c.pk, None), "seq": c.seq, "columns": names(tc), "row": c.row.as_ref().map(|r| row_json(tc, r))}))?
             }
             Some(Event::Overflow { last_seq }) => { send(&mut w, json!({"type": "overflow", "seq": last_seq}))?; return Ok(()); }
             None => if quiet.elapsed() >= Duration::from_secs(15) { w.write_all(b": keepalive\n\n")?; w.flush()?; quiet = Instant::now(); },

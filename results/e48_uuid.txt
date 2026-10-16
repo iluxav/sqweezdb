@@ -1,0 +1,10 @@
+=== E48: primary-key paths with UUID keys (1M rows, in-process) ===
+insert users, 1000-row transactions                                0.585 us/op     1709967/s
+insert orders (foreign key checked), 1000-row transactions         1.070 us/op      934551/s
+point read by primary key                                          0.484 us/op     2067982/s
+join order -> user through the foreign key, by order key           1.163 us/op      859693/s
+full join of 1M orders to users (Int(1000000) rows)            71072.568 us/op          14/s
+delete by primary key, autocommit                                  0.700 us/op     1428396/s
+delete user, cascading to its orders                               2.139 us/op      467430/s
+restart replaying the log                                          633.9 ms (users Int(980000) = Int(980000), orders Int(882000) = Int(882000))
+restart from the snapshot                                           86.2 ms; reads from the mapped snapshot 0.533 us (294000 hits)
