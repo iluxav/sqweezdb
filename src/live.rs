@@ -40,7 +40,7 @@ impl State {
 }
 pub struct Reactor { sql: Arc<Sql>, state: Arc<Mutex<State>>, pub debounce: Duration, pub reruns: AtomicU64, pub rerun_us: AtomicU64, pub events: AtomicU64, pub last_seq: AtomicU64, stop: Arc<AtomicBool> }
 
-fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone() } }
+fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), last_seq: 0 } }
 /// The predicates a single-table plan applies, including the ones hidden in its access path.
 fn plan_preds(sql: &Sql, sess: &Session, sp: &SelectPlan, params: &[Value]) -> Result<Vec<CPred>, String> {
     let mut preds: Vec<Pred> = sp.preds.clone(); let sch = &sp.table.schema;

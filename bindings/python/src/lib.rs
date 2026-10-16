@@ -8,7 +8,20 @@ use std::sync::{Arc, Mutex};
 
 #[pyclass(name = "Database")] struct PyDb { sql: Arc<Sql> }
 #[pyclass(name = "Statement")] struct PyStmt { p: Arc<Prepared> }
-#[pyclass(name = "Session", unsendable)] struct PySess { sql: Arc<Sql>, s: Mutex<Session> }
+#[pyclass(name = "Session")] struct PySess { sql: Arc<Sql>, s: Mutex<Session> }
+#[pyclass(name = "Subscription")] struct PySub { s: dblab::live::Subscription }
+#[pymethods] impl PySub {
+    /// Wait up to timeout_ms for the next change: (op, table, key, columns...) with op 1 insert, 2 update, 3 delete; None on timeout.
+    #[pyo3(signature = (timeout_ms = 1000))]
+    fn next<'py>(&self, py: Python<'py>, timeout_ms: u64) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        let ev = py.detach(|| self.s.recv_timeout(std::time::Duration::from_millis(timeout_ms)));
+        match ev {
+            Some(dblab::live::Event::Change(c)) => { let mut cells: Vec<Bound<'py, PyAny>> = vec![to_py(py, &Value::Int(match c.op { dblab::sql::ChangeOp::Insert => 1, dblab::sql::ChangeOp::Update => 2, dblab::sql::ChangeOp::Delete => 3 }))?, to_py(py, &Value::Text(c.table.clone()))?, to_py(py, &Value::Int(c.pk))?]; if let Some(r) = &c.row { for v in r { cells.push(to_py(py, v)?); } } Ok(Some(PyTuple::new(py, cells)?)) }
+            Some(dblab::live::Event::Overflow { .. }) => Err(pyo3::exceptions::PyRuntimeError::new_err("subscription fell behind and was dropped; resubscribe")),
+            _ => Ok(None),
+        }
+    }
+}
 
 fn to_value(v: &Bound<'_, PyAny>) -> PyResult<Value> {
     if v.is_none() { return Ok(Value::Null); }
@@ -49,6 +62,13 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
         let r = py.detach(|| sql.execute_s(&mut sess, &p, &vals)); *self.s.lock().unwrap() = sess;
         rows_to_py(py, r.map_err(pyo3::exceptions::PyRuntimeError::new_err)?)
     }
+    /// Subscribe to the changes a single-table SELECT would see; the WHERE is the filter, row policies apply.
+    #[pyo3(signature = (sql, params = None))]
+    fn subscribe<'py>(&self, sql: &str, params: Option<&Bound<'py, PyAny>>) -> PyResult<PySub> {
+        let vals: Vec<Value> = match params { Some(p) => p.try_iter()?.map(|x| to_value(&x?)).collect::<PyResult<_>>()?, None => vec![] };
+        let sess = std::mem::take(&mut *self.s.lock().unwrap()); let r = self.sql.reactor().subscribe(&sess, sql, &vals); *self.s.lock().unwrap() = sess;
+        Ok(PySub { s: r.map_err(pyo3::exceptions::PyValueError::new_err)? })
+    }
     /// Execute SQL text (DDL, admin statements, one-off queries).
     #[pyo3(signature = (sql, params = None))]
     fn exec<'py>(&self, py: Python<'py>, sql: &str, params: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyList>> {
@@ -59,4 +79,4 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
         rows_to_py(py, r.map_err(pyo3::exceptions::PyRuntimeError::new_err)?)
     }
 }
-#[pymodule] fn pydblab(m: &Bound<'_, PyModule>) -> PyResult<()> { m.add_class::<PyDb>()?; m.add_class::<PyStmt>()?; m.add_class::<PySess>()?; Ok(()) }
+#[pymodule] fn pydblab(m: &Bound<'_, PyModule>) -> PyResult<()> { m.add_class::<PyDb>()?; m.add_class::<PyStmt>()?; m.add_class::<PySess>()?; m.add_class::<PySub>()?; Ok(()) }

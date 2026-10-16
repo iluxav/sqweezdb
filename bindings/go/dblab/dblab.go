@@ -13,6 +13,7 @@ Stmt* dblab_prepare(Db*, const char*); void dblab_finalize(Stmt*);
 Rows* dblab_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* dblab_exec_text(Db*, Sess*, const char*, const CValue*, int);
 int dblab_rows_count(Rows*); int dblab_rows_cols(Rows*); int dblab_rows_get(Rows*, int, int, CValue*); int dblab_rows_all(Rows*, CValue*, int); void dblab_rows_free(Rows*);
 long long dblab_snapshot(Db*);
+typedef struct Sub Sub; Sub* dblab_subscribe(Db*, Sess*, const char*, const CValue*, int); int dblab_sub_next(Sub*, int, Rows**); void dblab_sub_free(Sub*);
 */
 import "C"
 import (
@@ -169,3 +170,43 @@ func (s *Session) ExecText(sql string, a ...any) ([][]any, error) {
 	}
 	return collect(r), nil
 }
+
+// Subscription delivers the changes a SELECT would see, as rows [op, table, key, columns...]; op is 1 insert, 2 update, 3 delete.
+type Subscription struct {
+	db *DB
+	p  *C.Sub
+}
+
+func (s *Session) Subscribe(sql string, a ...any) (*Subscription, error) {
+	cs := C.CString(sql)
+	defer C.free(unsafe.Pointer(cs))
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	vals, keep := args(a, &pin)
+	var vp *C.CValue
+	if len(vals) > 0 {
+		pin.Pin(&vals[0])
+		vp = &vals[0]
+	}
+	p := C.dblab_subscribe(s.db.p, s.p, cs, vp, C.int(len(vals)))
+	runtime.KeepAlive(keep)
+	if p == nil {
+		return nil, s.db.lastError()
+	}
+	return &Subscription{db: s.db, p: p}, nil
+}
+
+// Next blocks up to timeout for an event; it returns (nil, nil) on timeout and an error when the subscription was dropped.
+func (sub *Subscription) Next(timeoutMs int) ([]any, error) {
+	var r *C.Rows
+	switch C.dblab_sub_next(sub.p, C.int(timeoutMs), &r) {
+	case 0:
+		rows := collect(r)
+		return rows[0], nil
+	case 1:
+		return nil, nil
+	default:
+		return nil, errors.New("dblab: subscription fell behind and was dropped; resubscribe")
+	}
+}
+func (sub *Subscription) Close() { C.dblab_sub_free(sub.p) }

@@ -5,4 +5,5 @@ pub mod live;
 pub mod net;
 pub mod sql;
 pub mod table;
+pub mod tenants;
 pub mod util;

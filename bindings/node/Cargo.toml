@@ -15,4 +15,4 @@ napi-derive = "2"
 napi-build = "2"
 
 [profile.release]
-debug = 1
+strip = true

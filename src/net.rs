@@ -1,8 +1,10 @@
-//! Local connection for other processes: a length-prefixed binary protocol over a Unix domain socket.
-//! The owning process runs `Server`; any other process uses `Client`. One session per connection; LOGIN binds a user.
+//! Connection for other processes: a length-prefixed binary protocol over a Unix domain socket (local), a
+//! shared-memory ring (local, fastest) or TCP (other hosts, E40). The owning process runs `Server`; any other
+//! process uses `Client`. One session per connection; LOGIN binds a user.
 use crate::sql::{Session, Sql};
 use crate::table::Value;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -93,6 +95,11 @@ fn decode_result(b: &[u8], p: &mut usize) -> Result<Vec<Vec<Value>>, String> {
 fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> { let mut l = [0u8; 4]; r.read_exact(&mut l)?; let n = u32::from_le_bytes(l) as usize; let mut b = vec![0u8; n]; r.read_exact(&mut b)?; Ok(b) }
 fn write_frame(w: &mut impl Write, b: &[u8]) -> std::io::Result<()> { w.write_all(&(b.len() as u32).to_le_bytes())?; w.write_all(b)?; w.flush() }
 
+/// Anything the server can serve and the client can speak over: Unix sockets locally, TCP for other hosts.
+pub trait Stream: Read + Write + Send + 'static { fn dup(&self) -> std::io::Result<Self> where Self: Sized; }
+impl Stream for UnixStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
+impl Stream for TcpStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
+
 pub struct Server;
 impl Server {
     /// Accept connections forever on `path`; one thread and one session per connection.
@@ -107,8 +114,20 @@ impl Server {
             }
         }))
     }
-    fn serve(sql: Arc<Sql>, stream: UnixStream) -> std::io::Result<()> {
-        let mut r = BufReader::with_capacity(1 << 16, stream.try_clone()?); let mut w = BufWriter::with_capacity(1 << 16, stream);
+    /// The same protocol on a TCP address (e.g. "0.0.0.0:7781"), for clients on other hosts; one thread per connection.
+    pub fn start_tcp(sql: Arc<Sql>, addr: &str) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let listener = TcpListener::bind(addr)?;
+        Ok(std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(stream) = conn else { continue };
+                stream.set_nodelay(true).ok();
+                let sql = sql.clone();
+                std::thread::spawn(move || { let _ = Self::serve(sql, stream); });
+            }
+        }))
+    }
+    fn serve<S: Stream>(sql: Arc<Sql>, stream: S) -> std::io::Result<()> {
+        let mut r = BufReader::with_capacity(1 << 16, stream.dup()?); let mut w = BufWriter::with_capacity(1 << 16, stream);
         let mut sess = Session::default(); let mut out = Vec::with_capacity(1 << 16);
         let mut ring_closer: Option<Arc<std::sync::atomic::AtomicBool>> = None;
         loop {
@@ -156,9 +175,12 @@ impl Server {
     }
 }
 
-pub struct Client { r: BufReader<UnixStream>, w: BufWriter<UnixStream>, buf: Vec<u8>, ring: Option<(Ring, u32, std::path::PathBuf)> }
+pub struct Client { r: BufReader<Box<dyn Read + Send>>, w: BufWriter<Box<dyn Write + Send>>, buf: Vec<u8>, ring: Option<(Ring, u32, std::path::PathBuf)> }
 impl Client {
-    pub fn connect(path: &Path) -> std::io::Result<Client> { let s = UnixStream::connect(path)?; Ok(Client { r: BufReader::with_capacity(1 << 16, s.try_clone()?), w: BufWriter::with_capacity(1 << 16, s), buf: Vec::with_capacity(1 << 16), ring: None }) }
+    fn from_stream<S: Stream>(s: S) -> std::io::Result<Client> { Ok(Client { r: BufReader::with_capacity(1 << 16, Box::new(s.dup()?)), w: BufWriter::with_capacity(1 << 16, Box::new(s)), buf: Vec::with_capacity(1 << 16), ring: None }) }
+    pub fn connect(path: &Path) -> std::io::Result<Client> { Self::from_stream(UnixStream::connect(path)?) }
+    /// Connect over TCP to an owner started with `Server::start_tcp`.
+    pub fn connect_tcp(addr: &str) -> std::io::Result<Client> { let s = TcpStream::connect(addr)?; s.set_nodelay(true)?; Self::from_stream(s) }
     /// Connect, then switch to a shared-memory ring (a file under `shm_dir`, e.g. /dev/shm) for round trips.
     pub fn connect_shm(path: &Path, shm_dir: &Path) -> std::io::Result<Client> {
         let mut c = Client::connect(path)?;

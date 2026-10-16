@@ -1,0 +1,24 @@
+=== E40: a TCP server in front of the engine (1M rows; owner durable; client in a second process) ===
+network round trips (ping): loopback: rtt min/avg/max/mdev = 0.018/0.024/0.034/0.004 ms
+network round trips (ping): this machine's LAN gateway 10.168.168.1: rtt min/avg/max/mdev = 4.230/4.953/6.733/0.520 ms
+[SQLite, in-process] point read (check 99825557805)                                   0.89 us/op    1120344 ops/s
+[SQLite, in-process] insert, durable (synchronous=FULL), one connection             466.93 us/op       2142 ops/s
+[ours, in-process] point read (check 99825557805)                                     0.37 us/op    2684083 ops/s
+[ours, in-process] insert, durable, one thread                                      456.98 us/op       2188 ops/s
+[ours, in-process] inserts, durable, 8 threads                                      117.29 us/op       8526 ops/s
+[2nd process, TCP loopback] point read, one connection (check 99825557805)            5.13 us/op     194754 ops/s
+[2nd process, TCP loopback] point read, 100 statements per round trip                 0.56 us/op    1797586 ops/s
+[2nd process, TCP loopback] insert, durable, one connection                         449.10 us/op       2227 ops/s
+[2nd process, TCP loopback] point reads, 8 connections                                1.08 us/op     926748 ops/s
+[2nd process, TCP loopback] inserts, durable, 8 connections                         114.76 us/op       8714 ops/s
+[2nd process, unix socket] point read, one connection (check 100096855459)            3.21 us/op     311523 ops/s
+[2nd process, unix socket] point read, 100 statements per round trip                  0.56 us/op    1770047 ops/s
+[2nd process, unix socket] insert, durable, one connection                          439.82 us/op       2274 ops/s
+[2nd process, unix socket] point reads, 8 connections                                 0.69 us/op    1443130 ops/s
+[2nd process, unix socket] inserts, durable, 8 connections                          112.95 us/op       8853 ops/s
+[2nd process, shared-memory ring] point read, one connection (check 100199873906)      0.57 us/op    1744296 ops/s
+[2nd process, shared-memory ring] point read, 100 statements per round trip           0.50 us/op    1990864 ops/s
+[2nd process, shared-memory ring] insert, durable, one connection                   456.26 us/op       2192 ops/s
+[2nd process, shared-memory ring] point reads, 8 connections                          0.19 us/op    5385224 ops/s
+[2nd process, shared-memory ring] inserts, durable, 8 connections                   129.46 us/op       7724 ops/s
+owner sees count(*) = Int(1168000) (1,000,000 + 2,000 + 40,000 in-process + 3 x 42,000 from the client = 1,168,000)

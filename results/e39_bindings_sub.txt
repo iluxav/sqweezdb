@@ -1,0 +1,4 @@
+=== E39: subscriptions through the bindings + SSE example (1000 filtered events for user 42, 9,000 other rows filtered) ===
+Go SSE example (app embeds the engine, GET /events?user=42 streams Server-Sent Events; Go HTTP client measures): 1000/1000 events; insert -> SSE event p50 26 us, p99 71 us
+Python (PyO3, blocking next() with the interpreter lock released, consumer thread): 1000/1000; insert -> event p50 6 us, p99 21 us
+Node (N-API, await sub.next() on the thread pool): 1000/1000; insert -> event p50 87 us, p99 314 us

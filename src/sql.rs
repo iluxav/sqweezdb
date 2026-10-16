@@ -20,11 +20,12 @@ impl std::fmt::Debug for Expr { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -
 /// column is its primary key, copying that table's needed columns next to the row, so the pipeline sees one virtual row.
 pub struct JoinStep { pub build: Arc<Table>, pub build_key: usize, pub key_vidx: usize, pub build_preds: Vec<Pred>, pub build_cols: Vec<usize>, pub base: usize, pub vbase: usize, pub build_access: Access }
 pub struct JoinPlan { pub probe: Arc<Table>, pub probe_access: Access, pub probe_preds: Vec<Pred>, pub steps: Vec<JoinStep>, pub index_first: Option<Arc<SecIndex>> }
-pub struct SelectPlan { pub table: Arc<Table>, pub schema: Schema, pub access: Access, pub preds: Vec<Pred>, pub proj: Vec<Proj>, pub group_by: Option<usize>, pub order: Option<(usize, bool)>, pub limit: Option<usize>, pub join: Option<JoinPlan>, pub corr: Option<(usize, usize)>, pub subs: Vec<(Arc<SelectPlan>, Option<usize>)> }
+pub struct SelectPlan { pub table: Arc<Table>, pub schema: Schema, pub access: Access, pub preds: Vec<Pred>, pub proj: Vec<Proj>, pub names: Vec<String>, pub group_by: Option<usize>, pub order: Option<(usize, bool)>, pub limit: Option<usize>, pub join: Option<JoinPlan>, pub corr: Option<(usize, usize)>, pub subs: Vec<(Arc<SelectPlan>, Option<usize>)> }
 pub enum Plan { CreateTable(Schema), Insert { table: Arc<Table>, exprs: Vec<Expr> }, Select(SelectPlan), Update { table: Arc<Table>, sets: Vec<(usize, Expr)>, pk: Expr }, Delete { table: Arc<Table>, access: Access, preds: Vec<Pred> }, Begin, Commit, Rollback, Alter { table: String, ops: Vec<AlterOp> } }
 #[derive(Clone, Debug)] pub enum AlterOp { Add { col: Column, default: Value }, Drop(String), Rename(String, String), SetType(String, ColType), SetNotNull(String), DropNotNull(String) }
 pub struct Prepared { pub plan: Plan, pub nparams: usize, pub text: String, pub epoch: u64 }
-#[derive(Default)] pub struct Session { pub txn: Option<Txn>, pub user: Option<String>, pub roles: Vec<String>, pub attrs: HashMap<String, Value> }
+#[derive(Default)] pub struct Session { pub txn: Option<Txn>, pub user: Option<String>, pub roles: Vec<String>, pub attrs: HashMap<String, Value>, /// sequence of this session's last commit (autocommit or COMMIT); `Sql::wait_durable` makes it durable
+    pub last_seq: u64 }
 
 // ---------- access control: roles, users, table grants, row policies ----------
 pub const P_SELECT: u8 = 1; pub const P_INSERT: u8 = 2; pub const P_UPDATE: u8 = 4; pub const P_DELETE: u8 = 8;
@@ -64,11 +65,39 @@ fn default_value(e: &ast::Expr) -> Result<Value, String> {
         other => Err(format!("unsupported default {other}")),
     }
 }
+/// Output column names for a SELECT: an alias wins; otherwise the bare column name, unless that bare name appears
+/// twice in the result (a join), in which case the qualified form the user wrote (or the plan's `alias.col`) stays.
+fn finish_names(names: &mut Vec<String>, proj: &[Proj], schema: &Schema) {
+    for (i, p) in proj.iter().enumerate() {
+        if names.get(i).map(|n| n.is_empty()).unwrap_or(true) {
+            let n = match p { Proj::Col(v) => schema.columns.get(*v).map(|c| c.name.clone()).unwrap_or_else(|| format!("col{i}")), _ => format!("col{i}") };
+            if i < names.len() { names[i] = n } else { names.push(n) }
+        }
+    }
+    let bare: Vec<String> = names.iter().enumerate().map(|(i, n)| if matches!(proj.get(i), Some(Proj::Col(_))) { n.rsplit('.').next().unwrap_or(n).to_string() } else { n.clone() }).collect();
+    for i in 0..names.len() { if bare.iter().filter(|b| **b == bare[i]).count() == 1 { names[i] = bare[i].clone(); } }
+}
+/// A short machine-readable class for an error message, shared by every binding (`CONFLICT`, `DUPLICATE`, ...).
+pub fn error_code(msg: &str) -> &'static str {
+    let m = msg.trim_start();
+    if m.starts_with("Conflict") { "CONFLICT" }
+    else if m.starts_with("Duplicate") { "DUPLICATE" }
+    else if m.starts_with("NotFound") { "NOT_FOUND" }
+    else if m.starts_with("foreign key violation") || m.contains(" blocked: ") { "FOREIGN_KEY" }
+    else if m.starts_with("permission denied") { "DENIED" }
+    else if m.starts_with("statement needs ") { "ARGUMENTS" }
+    else if m.starts_with("already in a transaction") || m.starts_with("not in a transaction") { "TRANSACTION" }
+    else if m.contains("type mismatch") || m.contains(" exceeds ") || m.contains("is NOT NULL") || (m.starts_with("expected ") && m.contains(", got ")) || m.contains(": expected ") || m.contains("not a timestamp") { "TYPE" }
+    else if m.starts_with("sql parser error") || m.contains("Expected") || m.starts_with("expected ") || m.starts_with("unsupported") { "SYNTAX" }
+    else if m.starts_with("no such") || m.starts_with("unknown") || m.contains(" no such ") { "SCHEMA" }
+    else { "ERROR" }
+}
 fn coltype_of(dt: &ast::DataType) -> Result<ColType, String> {
     let s = format!("{dt}").to_uppercase();
     let num = |s: &str| s.split(|c| c == '(' || c == ')').nth(1).and_then(|x| x.trim().parse::<usize>().ok());
     Ok(match s.as_str() {
         "INT" | "INTEGER" | "BIGINT" | "INT64" | "SMALLINT" => ColType::Int,
+        "TIMESTAMP" | "DATETIME" | "TIMESTAMPTZ" => ColType::Timestamp,
         "DOUBLE" | "DOUBLE PRECISION" | "REAL" | "FLOAT" | "FLOAT64" => ColType::Float,
         "BOOL" | "BOOLEAN" => ColType::Bool,
         "TEXT" => ColType::Text(255), "BLOB" | "BYTEA" => ColType::Bytes(255),
@@ -290,10 +319,11 @@ impl<'a> Planner<'a> {
         // step keys must be in the virtual row: register them first (a key may come from the probe or an earlier step)
         let mut key_vidx = vec![0usize; step_specs.len()];
         for (k, &(_, _, ks, kc)) in step_specs.iter().enumerate() { key_vidx[k] = vidx(ks, kc); }
-        let mut proj = vec![];
+        let mut proj = vec![]; let mut names: Vec<String> = vec![];
         for item in sel.projection.iter().filter(|_| !exists) {
             match item {
                 SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                    names.push(match item { SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(), _ => match e { ast::Expr::Identifier(id) => id.value.clone(), ast::Expr::CompoundIdentifier(ids) => ids.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."), other => other.to_string() } });
                     if let ast::Expr::Subquery(q) = e { let srcs_c = srcs.clone(); let sp = self.plan_sub(q, &srcs_c, false)?; let oc = sp.corr.map(|(_, oc)| oc); subs.push((Arc::new(sp), oc)); proj.push(Proj::Sub(subs.len() - 1)); continue; }
                     if let Some((s, c)) = jcol(&srcs, e)? { proj.push(Proj::Col(vidx(s, c))); continue; }
                     if let ast::Expr::Function(f) = e {
@@ -348,12 +378,13 @@ impl<'a> Planner<'a> {
             let index_first = None; // decided adaptively at execution from the filtered build sizes
             let join = JoinPlan { probe: srcs[probe].table.clone(), probe_access, probe_preds, steps, index_first };
             self.cur = saved_cur;
-            return Ok(Plan::Select(SelectPlan { table: srcs[probe].table.clone(), schema, access: Access::Scan, preds: vec![], proj, group_by, order: order_by, limit, join: Some(join), corr, subs }));
+            finish_names(&mut names, &proj, &schema); return Ok(Plan::Select(SelectPlan { table: srcs[probe].table.clone(), schema, access: Access::Scan, preds: vec![], proj, names, group_by, order: order_by, limit, join: Some(join), corr, subs }));
         }
         let mut preds = std::mem::take(&mut side_preds[0]);
         let access = access_path(&srcs[0].table, &mut preds);
         self.cur = saved_cur;
-        Ok(Plan::Select(SelectPlan { table: srcs[0].table.clone(), schema, access, preds, proj, group_by, order: order_by, limit, join: None, corr, subs }))
+        finish_names(&mut names, &proj, &schema);
+        Ok(Plan::Select(SelectPlan { table: srcs[0].table.clone(), schema, access, preds, proj, names, group_by, order: order_by, limit, join: None, corr, subs }))
     }
     fn plan_delete(&mut self, d: &ast::Delete) -> Result<Plan, String> {
         let twj = match &d.from { ast::FromTable::WithFromKeyword(v) | ast::FromTable::WithoutKeyword(v) => v.first().ok_or("DELETE needs FROM")? };
@@ -469,7 +500,7 @@ impl<'a> Sink<'a> {
                 match a { Agg::CountStar => st.n += 1, Agg::CountCol(c) => if !is_null(row, *c) { st.n += 1 }, Agg::Sum(c) | Agg::Avg(c) | Agg::Min(c) | Agg::Max(c) => {
                     if is_null(row, *c) { continue; }
                     let off = self.schema.offsets[*c];
-                    let (fi, ff) = match self.schema.columns[*c].ty { ColType::Int => { let i = read_i64(row, off); (i, i as f64) }, ColType::Float => { let f = read_f64(row, off); (0, f) }, _ => (0, 0.0) };
+                    let (fi, ff) = match self.schema.columns[*c].ty { ColType::Int | ColType::Timestamp => { let i = read_i64(row, off); (i, i as f64) }, ColType::Float => { let f = read_f64(row, off); (0, f) }, _ => (0, 0.0) };
                     st.n += 1; st.sum_i += fi; st.sum_f += ff; if !st.seen || ff < st.min { st.min = ff; } if !st.seen || ff > st.max { st.max = ff; } st.seen = true; } }
             }
             return true;
@@ -478,7 +509,7 @@ impl<'a> Sink<'a> {
             // compare on raw bytes first; decode only survivors
             let c = match self.proj[oi] { Proj::Col(c) => c, _ => 0 };
             let off = self.schema.offsets[c];
-            let key = match self.schema.columns[c].ty { ColType::Int => read_i64(row, off) as f64, ColType::Float => read_f64(row, off), _ => 0.0 };
+            let key = match self.schema.columns[c].ty { ColType::Int | ColType::Timestamp => read_i64(row, off) as f64, ColType::Float => read_f64(row, off), _ => 0.0 };
             let key = if desc { -key } else { key };
             if self.topk.len() >= self.limit && key >= self.topk[self.limit - 1].0 { return true; }
             let vals: Vec<Value> = self.proj.iter().map(|p| match p { Proj::Col(c) => decode_col(self.schema, row, *c), Proj::Agg(_) => Value::Null, Proj::Sub(i) => self.subs[*i].get(row) }).collect();
@@ -512,10 +543,10 @@ impl<'a> Sink<'a> {
                     Proj::Sub(_) => Value::Null,
                     Proj::Agg(a) => { let x = st[k]; k += 1; match a {
                         Agg::CountStar | Agg::CountCol(_) => Value::Int(x.n as i64),
-                        Agg::Sum(c) => if x.n == 0 { Value::Null } else if schema.columns[*c].ty == ColType::Int { Value::Int(x.sum_i) } else { Value::Float(x.sum_f) },
+                        Agg::Sum(c) => if x.n == 0 { Value::Null } else if matches!(schema.columns[*c].ty, ColType::Int | ColType::Timestamp) { Value::Int(x.sum_i) } else { Value::Float(x.sum_f) },
                         Agg::Avg(_) => if x.n == 0 { Value::Null } else { Value::Float(x.sum_f / x.n as f64) },
-                        Agg::Min(c) => if x.n == 0 { Value::Null } else if schema.columns[*c].ty == ColType::Int { Value::Int(x.min as i64) } else { Value::Float(x.min) },
-                        Agg::Max(c) => if x.n == 0 { Value::Null } else if schema.columns[*c].ty == ColType::Int { Value::Int(x.max as i64) } else { Value::Float(x.max) } } }
+                        Agg::Min(c) => if x.n == 0 { Value::Null } else if matches!(schema.columns[*c].ty, ColType::Int | ColType::Timestamp) { Value::Int(x.min as i64) } else { Value::Float(x.min) },
+                        Agg::Max(c) => if x.n == 0 { Value::Null } else if matches!(schema.columns[*c].ty, ColType::Int | ColType::Timestamp) { Value::Int(x.max as i64) } else { Value::Float(x.max) } } }
                 }).collect()
             };
             if self.group_off.is_some() {
@@ -641,6 +672,9 @@ impl Sql {
     pub fn wait_alters(&self) -> Result<(), String> { let hs: Vec<_> = self.alters.lock().unwrap().drain(..).collect(); let mut r = Ok(()); for h in hs { if let Err(e) = h.join().map_err(|_| "alter thread panicked".to_string())? { r = Err(e); } } r }
     /// Create a fresh database directory and start it.
     pub fn create(dir: &std::path::Path, durable: bool) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start(); Sql::new(db) }
+    /// Create with log threads that leave after `idle` of silence (tenant hosting).
+    pub fn create_idle(dir: &std::path::Path, durable: bool, idle: std::time::Duration) -> Sql { let _ = std::fs::remove_dir_all(dir); let db = Arc::new(Database::open(dir, durable)); db.start_idle(idle); Sql::new(db) }
+    pub fn open_idle(dir: &std::path::Path, durable: bool, idle: std::time::Duration) -> Result<(Sql, RecStats), String> { let db = Arc::new(Database::open(dir, durable)); let sql = Sql::new(db.clone()); let st = db.recover(1, &mut |text| sql.apply_meta(text))?; db.start_idle(idle); Ok((sql, st)) }
     /// Open an existing database: replay the snapshot catalog + rows, then the log tail, then start the committer.
     pub fn open(dir: &std::path::Path, durable: bool, threads: usize) -> Result<(Sql, RecStats), String> {
         let db = Arc::new(Database::open(dir, durable));
@@ -657,6 +691,27 @@ impl Sql {
         Ok((sql, st, n))
     }
     pub fn snapshot(&self) -> SnapStats { self.db.snapshot() }
+    /// Block until commit `seq` (e.g. `Session::last_seq`) has been fsynced; works in both durability modes.
+    pub fn wait_durable(&self, seq: u64) { self.db.log.wait_durable(seq) }
+    /// Output columns of a prepared statement: (name, type when known). Empty for statements that return no rows.
+    pub fn columns(&self, p: &Prepared) -> Vec<(String, Option<ColType>)> {
+        match &p.plan {
+            Plan::Select(s) => s.proj.iter().enumerate().map(|(i, pr)| {
+                let name = s.names.get(i).cloned().unwrap_or_else(|| format!("col{i}"));
+                let ty = match pr {
+                    Proj::Col(v) => s.schema.columns.get(*v).map(|c| c.ty.clone()),
+                    Proj::Agg(Agg::Min(c)) | Proj::Agg(Agg::Max(c)) => s.schema.columns.get(*c).map(|c| c.ty.clone()),
+                    Proj::Agg(Agg::Sum(c)) => s.schema.columns.get(*c).map(|c| if c.ty == ColType::Float { ColType::Float } else { ColType::Int }),
+                    Proj::Agg(Agg::CountStar) | Proj::Agg(Agg::CountCol(_)) => Some(ColType::Int),
+                    Proj::Agg(Agg::Avg(_)) => Some(ColType::Float),
+                    Proj::Sub(_) => None,
+                };
+                (name, ty)
+            }).collect(),
+            Plan::Delete { .. } => vec![("changes".to_string(), Some(ColType::Int))],
+            _ => vec![],
+        }
+    }
     /// Open as a follower of another database directory: map its snapshot, replay its log, then keep applying new
     /// records as the owner commits them. Never writes to that directory and never starts a committer. Reads are
     /// ordinary SQL; `applied` is the last sequence seen.
@@ -820,7 +875,7 @@ impl Sql {
         let (nb, nm) = (p.col >> 3, 1u8 << (p.col & 7));
         let base = CPred { off, kind: 0, cmp: p.cmp, i: 0, f: 0.0, b: vec![], nb, nm, set: None, pair: None, corr_map: None, ckind: 0 };
         if let Expr::Scalar(sp) = &p.rhs { if let Some((_, oc)) = sp.corr {
-            if !matches!(c.ty, ColType::Int | ColType::Float) { return Err(format!("column {}: correlated comparison needs a numeric column", c.name)); }
+            if !matches!(c.ty, ColType::Int | ColType::Float | ColType::Timestamp) { return Err(format!("column {}: correlated comparison needs a numeric column", c.name)); }
             let rows = self.run_select(sess, sp, params)?;
             let mut map: FastMap<f64> = FastMap::default();
             for r in rows { if let Value::Int(k) = r[0] { if let Ok(f) = r[1].as_f64() { map.insert(k, f); } } }
@@ -828,7 +883,7 @@ impl Sql {
         } }
         if matches!(p.cmp, Cmp::IsNull | Cmp::IsNotNull) { return Ok(base); }
         if matches!(p.cmp, Cmp::In | Cmp::NotIn) {
-            if c.ty != ColType::Int { return Err(format!("column {}: IN is supported on INT columns (for now)", c.name)); }
+            if !matches!(c.ty, ColType::Int | ColType::Timestamp) { return Err(format!("column {}: IN is supported on INT columns (for now)", c.name)); }
             let mut pair = None;
             let keys: Vec<i64> = match &p.rhs {
                 Expr::List(items) => items.iter().map(|e| self.resolve(sess, e, params)).collect::<Result<Vec<_>, _>>()?.into_iter().filter_map(|v| if let Value::Int(i) = v { Some(i) } else { None }).collect(),
@@ -844,6 +899,7 @@ impl Sql {
         if v == Value::Null { return Ok(CPred { kind: 9, ..base }); } // comparison with NULL is never true
         Ok(match &c.ty {
             ColType::Int => CPred { kind: 0, i: v.as_i64().map_err(|e| format!("column {}: {e}", c.name))?, ..base },
+            ColType::Timestamp => CPred { kind: 0, i: match &v { Value::Text(s) => crate::table::parse_timestamp(s).ok_or_else(|| format!("column {}: not a timestamp {s:?}", c.name))?, other => other.as_i64().map_err(|e| format!("column {}: {e}", c.name))? }, ..base },
             ColType::Float => CPred { kind: 1, f: v.as_f64().map_err(|e| format!("column {}: {e}", c.name))?, ..base },
             ColType::Bool => CPred { kind: 2, i: match v { Value::Bool(b) => b as i64, v => return Err(format!("column {}: expected BOOL, got {v:?}", c.name)) }, ..base },
             ColType::Text(_) => CPred { kind: 3, b: match v { Value::Text(s) => s.into_bytes(), v => return Err(format!("column {}: expected TEXT, got {v:?}", c.name)) }, ..base },
@@ -864,13 +920,13 @@ impl Sql {
             Plan::CreateTable(s) => { if sess.user.is_some() { return Err("permission denied: only the application session can create tables".into()); } self.db.create_table(s.clone())?; self.log_meta(&p.text); Ok(vec![]) }
             Plan::Begin => { if sess.txn.is_some() { return Err("already in a transaction".into()); } sess.txn = Some(Txn::new()); Ok(vec![]) }
             Plan::Rollback => { sess.txn = None; Ok(vec![]) }
-            Plan::Commit => { let t = sess.txn.take().ok_or("not in a transaction")?; self.db.commit(t).map_err(|a| a.to_string())?; Ok(vec![]) }
+            Plan::Commit => { let t = sess.txn.take().ok_or("not in a transaction")?; sess.last_seq = self.db.commit(t).map_err(|a| a.to_string())?; Ok(vec![]) }
             Plan::Insert { table, exprs } => {
                 let policy = self.guard(sess, table, P_INSERT)?;
                 let vals = exprs.iter().map(|e| self.resolve(sess, e, params)).collect::<Result<Vec<_>, _>>()?;
                 let row = encode_row(&table.schema, &vals)?;
                 for p in &policy { if !p.eval(&row) { return Err(format!("permission denied: row violates a policy on {}", table.schema.name)); } }
-                match &mut sess.txn { Some(t) => table.txn_insert(t, &row), None => table.insert(&row).map(|_| ()) }.map_err(|a| a.to_string())?; Ok(vec![])
+                match &mut sess.txn { Some(t) => { table.txn_insert(t, &row).map_err(|a| a.to_string())?; } None => { sess.last_seq = table.insert(&row).map_err(|a| a.to_string())?; } } Ok(vec![])
             }
             Plan::Update { table, sets, pk } => {
                 let policy = self.guard(sess, table, P_UPDATE)?;
@@ -878,7 +934,7 @@ impl Sql {
                 let schema = &table.schema;
                 let vals = sets.iter().map(|(c, e)| self.resolve(sess, e, params).map(|v| (*c, v))).collect::<Result<Vec<_>, _>>()?;
                 let f = |row: &[u8]| -> Result<Vec<u8>, Abort> { for p in &policy { if !p.eval(row) { return Err(Abort::NotFound); } } let mut new = row.to_vec(); for (c, v) in &vals { encode_col(schema, &mut new, *c, v).map_err(Abort::Type)?; } for p in &policy { if !p.eval(&new) { return Err(Abort::Type("permission denied: new row violates a policy".into())); } } Ok(new) };
-                match &mut sess.txn { Some(t) => table.txn_update(t, pk, f), None => table.update_by_pk(pk, f).map(|_| ()) }.map_err(|a| a.to_string())?;
+                match &mut sess.txn { Some(t) => { table.txn_update(t, pk, f).map_err(|a| a.to_string())?; } None => { sess.last_seq = table.update_by_pk(pk, f).map_err(|a| a.to_string())?; } }
                 Ok(vec![])
             }
             Plan::Delete { table, access, preds } => {
@@ -898,7 +954,7 @@ impl Sql {
                 let n = pks.len();
                 match &mut sess.txn {
                     Some(t) => { for pk in pks { table.txn_delete(t, pk).map_err(|a| a.to_string())?; } }
-                    None => if n == 1 { table.delete_by_pk(pks[0]).map_err(|a| a.to_string())?; } else if n > 1 { let mut t = Txn::new(); for pk in pks { table.txn_delete(&mut t, pk).map_err(|a| a.to_string())?; } self.db.commit(t).map_err(|a| a.to_string())?; }
+                    None => if n == 1 { sess.last_seq = table.delete_by_pk(pks[0]).map_err(|a| a.to_string())?; } else if n > 1 { let mut t = Txn::new(); for pk in pks { table.txn_delete(&mut t, pk).map_err(|a| a.to_string())?; } sess.last_seq = self.db.commit(t).map_err(|a| a.to_string())?; }
                 }
                 Ok(vec![vec![Value::Int(n as i64)]])
             }
@@ -917,7 +973,7 @@ impl Sql {
             if let (Some(oc), Some((cv, _)), None) = (oc, sp.corr, &sp.join) {
                 if let (true, Some(ix), Some(Proj::Agg(agg))) = (outer_selective, sp.table.index_on(cv), sp.proj.get(1)) {
                     let pi = params.len();
-                    let lazy = Arc::new(SelectPlan { table: sp.table.clone(), schema: sp.schema.clone(), access: Access::Index(ix, Expr::Param(pi)), preds: sp.preds.clone(), proj: vec![Proj::Agg(agg.clone())], group_by: None, order: None, limit: None, join: None, corr: None, subs: vec![] });
+                    let lazy = Arc::new(SelectPlan { table: sp.table.clone(), schema: sp.schema.clone(), access: Access::Index(ix, Expr::Param(pi)), preds: sp.preds.clone(), proj: vec![Proj::Agg(agg.clone())], names: vec![], group_by: None, order: None, limit: None, join: None, corr: None, subs: vec![] });
                     let base: Vec<Value> = params.to_vec(); let dflt2 = dflt.clone();
                     let f = move |k: i64| -> Value { let mut p = base.clone(); p.push(Value::Int(k)); match self.run_select(sess, &lazy, &p) { Ok(rows) => rows.first().and_then(|r| r.first().cloned()).map(|v| if v == Value::Null { dflt2.clone() } else { v }).unwrap_or_else(|| dflt2.clone()), Err(_) => Value::Null } };
                     let sp2 = sp.clone(); let params2: Vec<Value> = params.to_vec();

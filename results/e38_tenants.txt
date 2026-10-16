@@ -1,0 +1,12 @@
+=== E38: database per tenant, 10,000 tenants x 10 rows, each engine in its own process ===
+ours    create 10000 tenants x 10 rows: 0.92 s (92 us each); right after: 1533 MB (157 KB/tenant) with 6423 log threads still winding down; 3 s later: 1334 MB (137 KB/tenant), 1 thread; after malloc_trim: 1331 MB
+ours    random tenant access, 8 threads, all 10000 resident: 229971 reads/s + 25554 writes/s; 1597 MB, 12450 threads
+ours    same access with at most 1,000 tenants resident (evicted tenants are dropped and reopened from disk): 25686 reads/s + 2855 writes/s; 77037 reopens (156 us each), 75985 evictions; process 354 MB
+ours    fleet migration ADD COLUMN on 1,000 tenants with 4 writer threads running on them: 1.04 s (1.0 ms per tenant), 0 failures, writers' worst stall 0.9 ms over 31941 inserts; tenant 7 reads flag = Bool(false)
+ours    per-tenant backup of 200 tenants to 200 prefixes with 200 passphrases: 200 done in 1.41 s; restore tenant 7 alone with its passphrase: 0 objects, 0.7 KB, 2.5 ms -> Int(46) rows; tenant 8 with tenant 7's passphrase refused: true
+sqlite  create 10000 files x 10 rows: 40.21 s (4021 us each); open all 10000 connections + one read each: 1.86 s (186 us each); resident 1750 MB (179 KB/connection), 1 threads
+sqlite  random tenant access, 8 threads, all 10000 connections open: 6970 reads/s + 777 writes/s; 1761 MB
+sqlite  fleet migration on 1,000 files: ADD COLUMN 2.74 s (2.7 ms each); SET NOT NULL via the copy-the-table recipe 0.66 s (0.7 ms each); each file is locked for writes during its own step; no backup/encryption in the engine
+turso   create 10000 files x 10 rows: 13.89 s (1389 us each); open all 10000 + one read each: 2.64 s (264 us each); resident 18788 MB (1924 KB/database), 1 threads
+turso   random tenant access, 1 thread (connections are not Send): 10440 ops/s
+exit 0
