@@ -94,8 +94,11 @@ export interface OpenOptions {
   follow?: { dir?: string; bucket?: BackupOptions; poll?: DurationLike };
   /** When the engine snapshots on its own: after this much new log (default '256MB') or after this long without writes (default '30s'). */
   snapshot?: { logBytes?: SizeLike; idleAfter?: DurationLike };
-  /** Doors for other processes: a Unix socket path and/or a TCP address with its shared token. */
-  listen?: { socket?: string; tcp?: string; token?: string };
+  /**
+   * Doors for other processes: a Unix socket path, a TCP address, and `http`, the web console served from this process
+   * (e.g. '127.0.0.1:7780'). TCP and the console need `token`. Closing the database closes them and frees the ports.
+   */
+  listen?: { socket?: string; tcp?: string; http?: string; token?: string };
   live?: { debounce?: DurationLike; queue?: number };
   log?: { threadsIdleAfter?: DurationLike };
   /** How rows become objects (this binding only). */

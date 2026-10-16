@@ -38,7 +38,9 @@ struct Live { prepared: Arc<Prepared>, sess: Session, params: Vec<Value>, tables
 impl State {
     fn reindex(&mut self) { self.keyed.clear(); self.key_cols.clear(); self.general.clear(); for (i, s) in self.subs.iter().enumerate() { match s.key { Some((c, v)) => { self.keyed.entry((s.table, c, v)).or_default().push(i); let cols = self.key_cols.entry(s.table).or_default(); if !cols.contains(&c) { cols.push(c); } } None => self.general.entry(s.table).or_default().push(i) } } }
 }
-pub struct Reactor { sql: Arc<Sql>, state: Arc<Mutex<State>>, pub debounce: Duration, pub reruns: AtomicU64, pub rerun_us: AtomicU64, pub events: AtomicU64, pub last_seq: AtomicU64, stop: Arc<AtomicBool> }
+/// Holds the database weakly: the database owns its reactor, and a reactor that owned the database back would keep
+/// it alive forever after the first subscription (E44).
+pub struct Reactor { sql: std::sync::Weak<Sql>, log: Arc<crate::table::GLog>, state: Arc<Mutex<State>>, pub debounce: Duration, pub reruns: AtomicU64, pub rerun_us: AtomicU64, pub events: AtomicU64, pub last_seq: AtomicU64, stop: Arc<AtomicBool>, thread: Mutex<Option<std::thread::JoinHandle<()>>> }
 
 fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), last_seq: 0 } }
 /// The predicates a single-table plan applies, including the ones hidden in its access path.
@@ -65,17 +67,24 @@ fn key_of(row: &[Value], key_col: Option<usize>) -> Option<i64> { match (key_col
 impl Reactor {
     pub fn start(sql: Arc<Sql>) -> Arc<Reactor> {
         sql.db.log.feeds.fetch_add(1, Ordering::Relaxed);  // keep the memory ring alive
-        let r = Arc::new(Reactor { sql: sql.clone(), state: Arc::new(Mutex::new(State::default())), debounce: sql.cfg.live.debounce, reruns: AtomicU64::new(0), rerun_us: AtomicU64::new(0), events: AtomicU64::new(0), last_seq: AtomicU64::new(0), stop: Arc::new(AtomicBool::new(false)) });
-        let r2 = r.clone(); std::thread::spawn(move || r2.run());
+        let r = Arc::new(Reactor { sql: Arc::downgrade(&sql), log: sql.db.log.clone(), thread: Mutex::new(None), state: Arc::new(Mutex::new(State::default())), debounce: sql.cfg.live.debounce, reruns: AtomicU64::new(0), rerun_us: AtomicU64::new(0), events: AtomicU64::new(0), last_seq: AtomicU64::new(0), stop: Arc::new(AtomicBool::new(false)) });
+        let r2 = r.clone(); let h = std::thread::spawn(move || r2.run()); *r.thread.lock().unwrap() = Some(h);
         r
     }
+    /// Stop the reactor thread and wait for it (unless called from it). Subscriptions stop receiving events.
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let h = self.thread.lock().unwrap().take();
+        if let Some(h) = h { if h.thread().id() != std::thread::current().id() { h.join().ok(); } }
+    }
     fn run(&self) {
-        let mut feed = self.sql.subscribe(self.sql.current_seq());
+        let mut feed = { let Some(sql) = self.sql.upgrade() else { return }; sql.subscribe(sql.current_seq()) };
         loop {
             if self.stop.load(Ordering::Relaxed) { return; }
             // sleep until something is appended, or until a dirty query is due
             let due = { let st = self.state.lock().unwrap(); st.lives.iter().filter_map(|l| l.dirty_since).map(|d| (d + self.debounce).saturating_duration_since(Instant::now())).min() };
-            self.sql.db.log.wait_feed(feed.last_seq(), due.unwrap_or(Duration::from_millis(20)).min(Duration::from_millis(20)));
+            self.log.wait_feed(feed.last_seq(), due.unwrap_or(Duration::from_millis(20)).min(Duration::from_millis(20)));
+            let Some(sql) = self.sql.upgrade() else { return };   // the database is gone
             let recs = feed.poll_raw(); let now = Instant::now();
             if !recs.is_empty() {
                 let mut st = self.state.lock().unwrap();
@@ -115,7 +124,7 @@ impl Reactor {
             for live in st.lives.iter_mut() {
                 let Some(d) = live.dirty_since else { continue }; if now.saturating_duration_since(d) < self.debounce { continue; }
                 let t0 = Instant::now();
-                let rows = match self.sql.execute_s(&mut live.sess, &live.prepared, &live.params) { Ok(r) => r, Err(_) => { live.dirty_since = None; continue; } };
+                let rows = match sql.execute_s(&mut live.sess, &live.prepared, &live.params) { Ok(r) => r, Err(_) => { live.dirty_since = None; continue; } };
                 self.reruns.fetch_add(1, Ordering::Relaxed); self.rerun_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                 live.dirty_since = None;
                 if rows != live.result {
@@ -129,26 +138,26 @@ impl Reactor {
         }
     }
     /// Subscribe to the changes a single-table SELECT would see: its WHERE becomes the filter, the session's row policies apply.
-    pub fn subscribe(&self, sess: &Session, sql: &str, params: &[Value]) -> Result<Subscription, String> {
-        let p = self.sql.prepare(sql)?;
+    pub fn subscribe(&self, sess: &Session, text: &str, params: &[Value]) -> Result<Subscription, String> {
+        let sql = self.sql.upgrade().ok_or("database is closed")?; let p = sql.prepare(text)?;
         let Plan::Select(sp) = &p.plan else { return Err("subscribe needs a SELECT".into()) };
         if sp.join.is_some() || !sp.subs.is_empty() { return Err("subscribe needs a single-table SELECT (watch handles joins)".into()); }
-        let preds = plan_preds(&self.sql, sess, sp, params)?; let policies = self.sql.guard(sess, &sp.table, P_SELECT)?;
+        let preds = plan_preds(&sql, sess, sp, params)?; let policies = sql.guard(sess, &sp.table, P_SELECT)?;
         // an equality on an INT column with a constant makes the subscription indexable
         let key = { let mut all: Vec<Pred> = sp.preds.clone(); match &sp.access { Access::Pk(e) => all.push(Pred { col: sp.table.schema.pk, cmp: Cmp::Eq, rhs: e.clone() }), Access::Index(ix, e) => all.push(Pred { col: ix.col, cmp: Cmp::Eq, rhs: e.clone() }), _ => {} }
             all.iter().find_map(|p| if p.cmp == Cmp::Eq && sp.table.schema.columns[p.col].ty == crate::table::ColType::Int { match &p.rhs { Expr::Lit(Value::Int(v)) => Some((p.col, *v)), Expr::Param(i) => match params.get(*i) { Some(Value::Int(v)) => Some((p.col, *v)), _ => None }, _ => None } } else { None }) };
-        let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: self.sql.cfg.live.queue, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
+        let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: sql.cfg.live.queue, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
         { let mut st = self.state.lock().unwrap(); st.subs.push(Sub { table: sp.table.id, preds, policies, q: q.clone(), key }); st.reindex(); }
         Ok(Subscription { q })
     }
     /// Watch a query: returns its current result and a handle that receives `Event::Live` whenever the result changes.
-    pub fn watch(&self, sess: &Session, sql: &str, params: &[Value]) -> Result<(Subscription, Vec<Vec<Value>>), String> {
-        let p = self.sql.prepare(sql)?;
+    pub fn watch(&self, sess: &Session, text: &str, params: &[Value]) -> Result<(Subscription, Vec<Vec<Value>>), String> {
+        let sql = self.sql.upgrade().ok_or("database is closed")?; let p = sql.prepare(text)?;
         let Plan::Select(sp) = &p.plan else { return Err("watch needs a SELECT".into()) };
         let mut tables = vec![]; tables_of(sp, &mut tables);
-        let single = if sp.join.is_none() && sp.subs.is_empty() { Some((sp.table.id, plan_preds(&self.sql, sess, sp, params)?, self.sql.guard(sess, &sp.table, P_SELECT)?)) } else { None };
+        let single = if sp.join.is_none() && sp.subs.is_empty() { Some((sp.table.id, plan_preds(&sql, sess, sp, params)?, sql.guard(sess, &sp.table, P_SELECT)?)) } else { None };
         let key_col = if sp.join.is_none() { sp.proj.iter().position(|pr| matches!(pr, Proj::Col(c) if *c == sp.table.schema.pk)) } else { None };
-        let mut s = session_like(sess); let result = self.sql.execute_s(&mut s, &p, params)?;
+        let mut s = session_like(sess); let result = sql.execute_s(&mut s, &p, params)?;
         let q = Arc::new(Queue { items: Mutex::new(VecDeque::new()), cv: Condvar::new(), cap: 4096, closed: AtomicBool::new(false), delivered: AtomicU64::new(0) });
         let keys = result.iter().filter_map(|r| key_of(r, key_col)).collect();
         self.state.lock().unwrap().lives.push(Live { prepared: p.clone(), sess: s, params: params.to_vec(), tables, single, key_col, result: result.clone(), keys, dirty_since: None, q: q.clone() });
@@ -156,4 +165,4 @@ impl Reactor {
     }
     pub fn counts(&self) -> (usize, usize) { let st = self.state.lock().unwrap(); (st.subs.len(), st.lives.len()) }
 }
-impl Drop for Reactor { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); self.sql.db.log.feeds.fetch_sub(1, Ordering::Relaxed); } }
+impl Drop for Reactor { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); self.log.feeds.fetch_sub(1, Ordering::Relaxed); } }

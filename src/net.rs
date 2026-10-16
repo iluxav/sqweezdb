@@ -12,7 +12,7 @@ use std::sync::Arc;
 const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4; const K_SUB: u8 = 5; const K_AUTH: u8 = 6;
 /// Where a local client may place its shared-memory ring; the server refuses any other path (it writes into that file).
 const SHM_DIR: &str = "/dev/shm/"; const SHM_PREFIX: &str = "sqweezdb-ring-";
-fn same_secret(a: &[u8], b: &[u8]) -> bool { let mut d = (a.len() != b.len()) as u8; for i in 0..a.len().min(b.len()) { d |= a[i] ^ b[i]; } d == 0 }
+pub fn same_secret(a: &[u8], b: &[u8]) -> bool { let mut d = (a.len() != b.len()) as u8; for i in 0..a.len().min(b.len()) { d |= a[i] ^ b[i]; } d == 0 }
 // shared-memory ring: one outstanding request per connection, both sides spin briefly then back off
 const SHM_SIZE: usize = 2 << 20; const REQ_OFF: usize = 64; const REQ_CAP: usize = 1 << 20; const RESP_OFF: usize = REQ_OFF + REQ_CAP; const RESP_CAP: usize = SHM_SIZE - RESP_OFF;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -107,37 +107,52 @@ pub trait Stream: Read + Write + Send + 'static { fn dup(&self) -> std::io::Resu
 impl Stream for UnixStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
 impl Stream for TcpStream { fn dup(&self) -> std::io::Result<Self> { self.try_clone() } }
 
+/// An accept loop that can be stopped: `shutdown` (or drop) sets a flag, connects once to wake the blocked accept,
+/// joins the thread, and so frees the port (and removes a Unix socket file).
+pub struct Listener { stop: Arc<std::sync::atomic::AtomicBool>, wake: Wake, thread: Option<std::thread::JoinHandle<()>> }
+enum Wake { Tcp(std::net::SocketAddr), Unix(std::path::PathBuf) }
+impl Listener {
+    pub fn shutdown(&mut self) {
+        let Some(h) = self.thread.take() else { return };
+        self.stop.store(true, Ordering::Relaxed);
+        match &self.wake { Wake::Tcp(a) => { let _ = TcpStream::connect_timeout(a, std::time::Duration::from_secs(1)); } Wake::Unix(p) => { let _ = UnixStream::connect(p); } }
+        if h.thread().id() != std::thread::current().id() { h.join().ok(); }
+        if let Wake::Unix(p) = &self.wake { std::fs::remove_file(p).ok(); }
+    }
+    pub fn local_addr(&self) -> Option<std::net::SocketAddr> { match self.wake { Wake::Tcp(a) => Some(a), _ => None } }
+}
+impl Drop for Listener { fn drop(&mut self) { self.shutdown(); } }
+/// Accept TCP connections until stopped or until `on` returns false (the database is gone).
+pub fn accept_tcp(listener: TcpListener, mut on: impl FnMut(TcpStream) -> bool + Send + 'static) -> std::io::Result<Listener> {
+    let mut addr = listener.local_addr()?;
+    if addr.ip().is_unspecified() { addr.set_ip(if addr.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() }); }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false)); let s2 = stop.clone();
+    let h = std::thread::spawn(move || { for conn in listener.incoming() { if s2.load(Ordering::Relaxed) { return; } let Ok(stream) = conn else { continue }; if !on(stream) { return; } } });
+    Ok(Listener { stop, wake: Wake::Tcp(addr), thread: Some(h) })
+}
+fn accept_unix(listener: UnixListener, path: &Path, mut on: impl FnMut(UnixStream) -> bool + Send + 'static) -> Listener {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false)); let s2 = stop.clone();
+    let h = std::thread::spawn(move || { for conn in listener.incoming() { if s2.load(Ordering::Relaxed) { return; } let Ok(stream) = conn else { continue }; if !on(stream) { return; } } });
+    Listener { stop, wake: Wake::Unix(path.to_path_buf()), thread: Some(h) }
+}
+
 pub struct Server;
 impl Server {
-    /// Accept connections forever on `path`; one thread and one session per connection.
-    pub fn start(sql: Arc<Sql>, path: &Path) -> std::io::Result<std::thread::JoinHandle<()>> {
+    /// Accept connections on `path`; one thread and one session per connection. Connections hold the database weakly.
+    pub fn start(sql: Arc<Sql>, path: &Path) -> std::io::Result<Listener> {
         std::fs::remove_file(path).ok();
         let listener = UnixListener::bind(path)?; let weak = Arc::downgrade(&sql); drop(sql);
-        Ok(std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(stream) = conn else { continue };
-                let Some(sql) = weak.upgrade() else { return };   // the database is gone: stop accepting
-                std::thread::spawn(move || { let _ = Self::serve(sql, stream, None, false); });
-            }
-        }))
+        Ok(accept_unix(listener, path, move |stream| { if weak.strong_count() == 0 { return false; } let w = weak.clone(); std::thread::spawn(move || { let _ = Self::serve(w, stream, None, false); }); true }))
     }
     /// The same protocol on a TCP address (e.g. "0.0.0.0:7781"), for clients on other hosts; one thread per connection.
     /// `token` is a shared secret every connection must present first (sent in the clear: pair it with a private
     /// network or a TLS tunnel until H55). Remote clients cannot use shared-memory rings.
-    pub fn start_tcp(sql: Arc<Sql>, addr: &str, token: &str) -> std::io::Result<std::thread::JoinHandle<()>> {
+    pub fn start_tcp(sql: Arc<Sql>, addr: &str, token: &str) -> std::io::Result<Listener> {
         if token.is_empty() { return Err(std::io::Error::other("a TCP listener needs a non-empty token")); }
         let listener = TcpListener::bind(addr)?; let token: Arc<str> = Arc::from(token); let weak = Arc::downgrade(&sql); drop(sql);
-        Ok(std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(stream) = conn else { continue };
-                stream.set_nodelay(true).ok();
-                let Some(sql) = weak.upgrade() else { return };
-                let token = token.clone();
-                std::thread::spawn(move || { let _ = Self::serve(sql, stream, Some(token), true); });
-            }
-        }))
+        accept_tcp(listener, move |stream| { if weak.strong_count() == 0 { return false; } stream.set_nodelay(true).ok(); let (w, t) = (weak.clone(), token.clone()); std::thread::spawn(move || { let _ = Self::serve(w, stream, Some(t), true); }); true })
     }
-    fn serve<S: Stream>(sql: Arc<Sql>, stream: S, token: Option<Arc<str>>, remote: bool) -> std::io::Result<()> {
+    fn serve<S: Stream>(weak: std::sync::Weak<Sql>, stream: S, token: Option<Arc<str>>, remote: bool) -> std::io::Result<()> {
         let mut r = BufReader::with_capacity(1 << 16, stream.dup()?); let mut w = BufWriter::with_capacity(1 << 16, stream);
         let mut sess = Session::default(); let mut out = Vec::with_capacity(1 << 16);
         let mut ring_closer: Option<Arc<std::sync::atomic::AtomicBool>> = None;
@@ -151,12 +166,13 @@ impl Server {
             let req = match read_frame(&mut r) { Ok(b) => b, Err(_) => { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) } };
             out.clear();
             if req.is_empty() { continue; }
+            let Some(sql) = weak.upgrade() else { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) };   // held for this request only
             if req[0] == K_SHM {
                 // the client created a ring file under SHM_DIR; serve it from a dedicated thread, the socket stays for shutdown
                 let path = String::from_utf8_lossy(&req[1..]).into_owned();
                 let allowed = !remote && path.starts_with(SHM_DIR) && path[SHM_DIR.len()..].starts_with(SHM_PREFIX) && !path[SHM_DIR.len()..].contains('/') && !path.contains("..");
                 let r: Result<Vec<Vec<Value>>, String> = match if allowed { Ring::open(Path::new(&path), false) } else { Err(std::io::Error::other(if remote { "shared memory is for local clients" } else { "ring files must be /dev/shm/sqweezdb-ring-*" })) } {
-                    Ok(ring) => { let closer = Arc::new(std::sync::atomic::AtomicBool::new(false)); ring_closer = Some(closer.clone()); let sql2 = sql.clone(); std::thread::spawn(move || Self::serve_ring(sql2, ring, closer)); Ok(vec![]) }
+                    Ok(ring) => { let closer = Arc::new(std::sync::atomic::AtomicBool::new(false)); ring_closer = Some(closer.clone()); let w2 = weak.clone(); std::thread::spawn(move || Self::serve_ring(w2, ring, closer)); Ok(vec![]) }
                     Err(e) => Err(e.to_string()),
                 };
                 encode_result(&mut out, &r); write_frame(&mut w, &out)?; continue;
@@ -164,8 +180,9 @@ impl Server {
             if req[0] == K_SUB {
                 // a subscription connection: acknowledge, then push one frame per event until the client goes away
                 let mut p = 1; let sub = match decode_exec(&req, &mut p).and_then(|(s, ps)| sql.reactor().subscribe(&sess, &s, &ps)) { Ok(sub) => { encode_result(&mut out, &Ok(vec![])); write_frame(&mut w, &out)?; sub } Err(e) => { encode_result(&mut out, &Err(e)); write_frame(&mut w, &out)?; continue; } };
+                drop(sql);
                 loop {
-                    let Some(ev) = sub.recv_timeout(std::time::Duration::from_millis(200)) else { continue };
+                    let Some(ev) = sub.recv_timeout(std::time::Duration::from_millis(200)) else { if weak.strong_count() == 0 { return Ok(()); } continue };
                     out.clear();
                     match ev {
                         crate::live::Event::Change(c) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), Value::Int(c.pk)]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } encode_result(&mut out, &Ok(vec![row])); }
@@ -179,7 +196,7 @@ impl Server {
             write_frame(&mut w, &out)?;
         }
     }
-    fn serve_ring(sql: Arc<Sql>, mut ring: Ring, closer: Arc<std::sync::atomic::AtomicBool>) {
+    fn serve_ring(weak: std::sync::Weak<Sql>, mut ring: Ring, closer: Arc<std::sync::atomic::AtomicBool>) {
         let mut sess = Session::default(); let mut out = Vec::with_capacity(1 << 16); let mut seq = 0u32;
         loop {
             if closer.load(Ordering::Relaxed) { ring.closed().store(1, Ordering::Relaxed); return; }
@@ -187,7 +204,8 @@ impl Server {
             seq += 1;
             let n = ring.req_len().load(Ordering::Acquire) as usize;
             let req = ring.read_at(REQ_OFF, n).to_vec();
-            out.clear(); dispatch(&sql, &mut sess, &req, &mut out);
+            let Some(sql) = weak.upgrade() else { ring.closed().store(1, Ordering::Relaxed); return };
+            out.clear(); dispatch(&sql, &mut sess, &req, &mut out); drop(sql);
             let n = out.len().min(RESP_CAP); ring.write_at(RESP_OFF, &out[..n]); ring.resp_len().store(n as u32, Ordering::Release);
             ring.resp_seq().store(seq, Ordering::Release);
         }

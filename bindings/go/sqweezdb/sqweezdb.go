@@ -69,6 +69,7 @@ type Snapshot struct {
 type Listen struct {
 	Socket string `json:"socket,omitempty"`
 	TCP    string `json:"tcp,omitempty"`
+	HTTP   string `json:"http,omitempty"` // the web console, served from this process; needs Token
 	Token  string `json:"token,omitempty"`
 }
 type Live struct {

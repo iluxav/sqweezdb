@@ -34,6 +34,29 @@ in your process and a directory on disk. No server to run, unless you want one.
   resident; idle tenants are evicted and reopened on demand.
 - **Bindings** for Node, Python, Go and C, plus the Rust crate itself.
 
+## Install
+
+The `sqweezdb` command (server, shell, web console), prebuilt for Linux and macOS on x86_64 and arm64:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/iluxav/sqweezdb/main/install.sh | sh
+```
+
+It installs to `~/.local/bin` (or `/usr/local/bin` as root) after checking the download against the
+release's `SHA256SUMS`. `SQWEEZDB_VERSION=v0.1.0` pins a release, `SQWEEZDB_INSTALL_DIR` picks the
+directory, `sh install.sh --uninstall` removes it. On Linux it takes the glibc build (glibc 2.17 or
+newer, as fast as a native build) and switches to the static musl build on Alpine; `SQWEEZDB_LIBC=musl`
+forces it.
+
+From a checkout:
+
+```sh
+make install            # builds target/dist/sqweezdb and installs it to ~/.local/bin (PREFIX=... to change)
+make uninstall
+```
+
+The language bindings are built from source for now (see [Building](#building-from-source)).
+
 ## Quick start
 
 ### Node
@@ -75,6 +98,18 @@ microsecond. Promises appear only where there is real waiting: `run().durable`, 
 a `BigInt` past 2^53, `BYTES` a `Buffer`, `TIMESTAMP` a `Date`. Errors are a `SqweezError` with a
 `code`: `CONFLICT`, `DUPLICATE`, `FOREIGN_KEY`, `DENIED`, `NOT_FOUND`, `TYPE`, `SYNTAX`, `SCHEMA`.
 The full surface is in `bindings/node/index.d.ts`.
+
+The web console can run inside your Node app, served by the library itself on its own port. It is off
+unless you ask for it:
+
+```js
+const db = open('./data', { listen: { http: '127.0.0.1:7780', token: process.env.DB_CONSOLE_TOKEN } })
+// open http://127.0.0.1:7780/ in a browser and paste the token
+```
+
+It runs on the database's own threads, not on the event loop. Measured in E44: one extra thread and
+0.1 MB at idle, no added event-loop lag and no slowdown of the app's own queries while another
+process hammered the console. `db.close()` closes the console and its open streams and frees the port.
 
 The package is not on npm yet. To build it: see [Building](#building-from-source).
 
@@ -144,6 +179,37 @@ first and exists for tests and experiments.
 `sqweezdb_rows_all`, `sqweezdb_subscribe`, ...). The Go binding in `bindings/go/sqweezdb/sqweezdb.go`
 doubles as its reference; the declarations are in its cgo preamble.
 
+## The `sqweezdb` command and the web console
+
+```sh
+sqweezdb serve ./data --ui 127.0.0.1:7780 --tcp 0.0.0.0:7781 --config /etc/sqweezdb/orders.toml
+sqweezdb shell ./data                       # SQL in the terminal, in-process
+sqweezdb shell db.internal:7781 --token …   # the same over TCP against a running server
+```
+
+`serve` owns a directory, starts whatever the configuration asks for (socket, TCP, backup, snapshot
+policy) and, with `--ui`, a web console: tables and schema, a SQL console with a **Live** toggle that
+turns any query into a result that updates as rows change, a change tail for any filter, the status
+of the log, the snapshot policy and the bucket, users, roles, grants and row policies, and a snapshot
+button. It is one HTML page compiled into the binary and a small JSON API, no framework and no build
+step. Every API call needs the token; without `--token` one is generated and printed once. Bind the
+console to loopback unless you mean otherwise; it runs as the application session and sees everything.
+
+`Ctrl-C` stops cleanly: a final snapshot is written, so the next start maps it and answers at once.
+A directory is held with a lock while open; a second process (or a second handle in the same process)
+is refused instead of corrupting the log.
+
+Measured in E43 on the lab machine: the command is 15 MB stripped and idles at 6 MB resident with the
+console and TCP listening; a point read through the console's HTTP and JSON costs 7.9 µs against
+5.4 µs over the binary frame protocol; a live query shows an insert about 8 ms later (the 5 ms
+debounce plus delivery); stopping a 1M-row database took 0.26 s including its snapshot, and the
+restart answered 54 ms after launch.
+
+The same console can be served by an embedded database, from inside your application: set
+`listen.http` (and `listen.token`) in the options of any binding. Nothing listens unless you do. In a
+Node app it cost one idle thread and 0.1 MB and did not slow the app (E44). For the smallest library,
+build without the `ui` cargo feature.
+
 ## Configuration
 
 Every binding opens with the same keys. Options passed from code win over a TOML file the
@@ -173,7 +239,7 @@ const db = open('./data', {
 
   follow: { dir: '/srv/primary' },          // or { bucket: {...} }: open as a read-only replica
   snapshot: { logBytes: '64MB', idleAfter: '30s' },   // when the engine snapshots on its own (defaults)
-  listen: { socket: '/run/sqweezdb/orders.sock', tcp: '0.0.0.0:7781', token: process.env.DB_TOKEN },
+  listen: { socket: '/run/sqweezdb/orders.sock', tcp: '0.0.0.0:7781', http: '127.0.0.1:7780', token: process.env.DB_TOKEN },
   live: { debounce: '5ms', queue: 65536 },  // live-query debounce, per-subscriber queue before overflow
   log: { threadsIdleAfter: '60s' },         // log threads leave when idle and return on the next write
 })
@@ -285,19 +351,29 @@ need only the key under a hard memory cap.
 
 ## Building from source
 
-Requirements: Rust 1.98 or newer, a system `libsqlite3` with headers (the reference benchmarks link
-it), and for the bindings Node 20+, Python 3.11+ and Go 1.24+.
+Requirements: Rust 1.85 or newer (edition 2024), and for the bindings Node 20+, Python 3.11+ and Go 1.24+.
 
 ```sh
-cargo build --release                      # engine, C ABI (target/release/libsqweezdb.so), experiments
+make                                       # the sqweezdb command: target/dist/sqweezdb
+make test                                  # unit tests
+make dist                                  # dist/sqweezdb-<target>.tar.gz + .sha256, as a release ships it
+cargo build --release                      # engine and C ABI (target/release/libsqweezdb.so)
 
 cd bindings/node && cargo build --release && cp target/release/libsqweezdb_node.so sqweezdb.node
 cd bindings/python && cargo build --release && cp target/release/libsqweezdb_py.so sqweezdb.so
 cd bindings/go && go build ./...           # links ../../target/release/libsqweezdb.so
 ```
 
-The Node benchmark against better-sqlite3 needs `npm install --no-save better-sqlite3` in
-`bindings/node`; it is then `node e41_api.js`.
+The experiments that race SQLite and Turso need the `lab` feature and a system `libsqlite3` with
+headers: `cargo lab e40_tcp` (an alias for `cargo run --release --features lab --bin`), or `make lab`
+to build them all. The Node benchmark against better-sqlite3 needs `npm install --no-save
+better-sqlite3` in `bindings/node`; it is then `node e41_api.js`.
+
+**Releases.** Push a tag that matches the version in `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`).
+The release workflow builds the four Linux binaries (glibc 2.17 and static musl, x86_64 and arm64)
+with `cargo zigbuild` and the two macOS binaries natively, checks the tag against the version, and
+publishes a GitHub release with the tarballs, `SHA256SUMS` and `install.sh`. Running the workflow by
+hand builds the artifacts without publishing.
 
 ## Repository layout
 
@@ -305,7 +381,7 @@ The Node benchmark against better-sqlite3 needs `npm install --no-save better-sq
   change feed · `src/live.rs` subscriptions and live queries · `src/cloud.rs` S3 backup, compression,
   encryption · `src/tenants.rs` many databases per process · `src/net.rs` socket, ring and TCP
   server · `src/capi.rs` C ABI.
-- `src/config.rs` the configuration keys, file loading and validation.
+- `src/config.rs` the configuration keys, file loading and validation · `src/ui.rs` and `src/ui/index.html` the web console · `src/main.rs` the `sqweezdb` command.
 - `src/bin/e*.rs` the experiments, one per question asked during development; their raw outputs are
   in `results/`.
 - `bindings/node`, `bindings/python`, `bindings/go` the language bindings.

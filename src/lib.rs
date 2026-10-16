@@ -7,4 +7,5 @@ pub mod net;
 pub mod sql;
 pub mod table;
 pub mod tenants;
+#[cfg(feature = "ui")] pub mod ui;
 pub mod util;

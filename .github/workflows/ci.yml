@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: make test
+      - name: Build the sqweezdb command
+        run: make build && target/dist/sqweezdb version
+      - name: Experiments still compile (Linux; they link the system SQLite)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libsqlite3-dev && cargo check --release --features lab --bins
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqweezdb-${{ runner.os }}-${{ runner.arch }}
+          path: target/dist/sqweezdb
+          retention-days: 7

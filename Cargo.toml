@@ -9,9 +9,9 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 memmap2 = "0.9.11"
-rusqlite = { version = "0.40.2", features = ["backup", "hooks"] }
+rusqlite = { version = "0.40.2", features = ["backup", "hooks"], optional = true }   # reference engine for the experiments (feature "lab")
 sqlparser = "0.63.0"
-turso = "0.8.3"
+turso = { version = "0.8.3", optional = true }   # reference engine for the experiments (feature "lab")
 tokio = { version = "1", features = ["rt", "macros"] }
 object_store = { version = "0.13", features = ["aws"] }
 futures-util = "0.3"
@@ -23,8 +23,182 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
+# The static Linux builds use musl, whose allocator made the engine 2x slower (measured in E45); the command uses
+# mimalloc there. Library builds keep the host allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [features]
-bundled = ["rusqlite/bundled"]
+default = ["ui"]
+# the experiments in src/bin that race SQLite and Turso: `cargo lab e40_tcp` (alias in .cargo/config.toml)
+lab = ["dep:rusqlite", "dep:turso"]
+# the web console (listen.http): off at runtime until configured; build without it for the smallest library
+ui = []
+bundled = ["lab", "rusqlite/bundled"]
+
+# Release artifacts: `cargo build --profile dist` (what `make install` and the release workflow build)
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
+lto = "thin"
+codegen-units = 1
+
+# Experiments that compare against SQLite or Turso need the "lab" feature.
+[[bin]]
+name = "e00_baseline"
+path = "src/bin/e00_baseline.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e01_read_scaling"
+path = "src/bin/e01_read_scaling.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e01b_sqlite_knobs"
+path = "src/bin/e01b_sqlite_knobs.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e04_sqlite_queries"
+path = "src/bin/e04_sqlite_queries.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e06_scan_parity"
+path = "src/bin/e06_scan_parity.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e09_recovery"
+path = "src/bin/e09_recovery.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e11_joins"
+path = "src/bin/e11_joins.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e12_memory"
+path = "src/bin/e12_memory.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e13_sql"
+path = "src/bin/e13_sql.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e14_txn"
+path = "src/bin/e14_txn.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e15_sql_joins"
+path = "src/bin/e15_sql_joins.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e16_access"
+path = "src/bin/e16_access.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e18_index_rematch"
+path = "src/bin/e18_index_rematch.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e19a_null_delete"
+path = "src/bin/e19a_null_delete.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e20_multijoin_subq"
+path = "src/bin/e20_multijoin_subq.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e21_second_process"
+path = "src/bin/e21_second_process.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e22_memory_rematch"
+path = "src/bin/e22_memory_rematch.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e24_correlated"
+path = "src/bin/e24_correlated.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e25_restart_rematch"
+path = "src/bin/e25_restart_rematch.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e26_replication"
+path = "src/bin/e26_replication.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e27_space"
+path = "src/bin/e27_space.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e28_turso"
+path = "src/bin/e28_turso.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e29_quirks"
+path = "src/bin/e29_quirks.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e30_alter"
+path = "src/bin/e30_alter.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e31_fkeys"
+path = "src/bin/e31_fkeys.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e32_feed"
+path = "src/bin/e32_feed.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e33_cloud"
+path = "src/bin/e33_cloud.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e34_compact"
+path = "src/bin/e34_compact.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e37_reactive"
+path = "src/bin/e37_reactive.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e38_tenants"
+path = "src/bin/e38_tenants.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "e40_tcp"
+path = "src/bin/e40_tcp.rs"
+required-features = ["lab"]
 
 [profile.release]
 debug = 1

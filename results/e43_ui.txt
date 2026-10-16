@@ -1,0 +1,12 @@
+=== E43: the web console (`sqweezdb serve --ui`): what it costs and how fast it is ===
+the sqweezdb command: 15.2 MB stripped (engine, S3 client, TLS, SQL parser, console); the embedded page is 16.3 KB
+idle `sqweezdb serve --ui --tcp`, empty database: 5.7 MB resident, 6 threads
+loaded 1M rows over TCP, 1000 statements per round trip: 0.89 s
+with 1M rows: 117.7 MB resident, 7 threads
+point read, one connection: console HTTP+JSON 7.9 us per query (108 B responses), frame protocol over TCP 5.4 us
+GROUP BY over 1M rows through the console: 5.7 ms in the engine, 20 groups back as JSON
+a typo through the console: HTTP 400 {"code":"SYNTAX","error":"sql parser error: Expected: an SQL statement, found: SELEC at Line: 1, Column: 1"}
+wrong token: HTTP/1.1 401 Unauthorized
+live query in the console: insert over TCP -> updated result on the event stream, p50 7.9 ms, p99 9.1 ms (5 ms debounce by default)
+SIGINT: exit status: 0 after 0.26 s; "stopped: final snapshot of 1000200 rows in 184 ms"; snapshot present: true
+restart from that snapshot: answering 54 ms after launch, Int(1000200) rows

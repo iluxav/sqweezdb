@@ -8,7 +8,7 @@ name = "sqweezdb_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-sqweezdb = { path = "../.." }
+sqweezdb = { path = "../.." }   # includes the web console (off until listen.http is set)
 pyo3 = { version = "0.28", features = ["extension-module"] }
 
 [profile.release]

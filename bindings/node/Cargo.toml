@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-sqweezdb = { path = "../.." }
+sqweezdb = { path = "../.." }   # includes the web console (off until listen.http is set)
 napi = { version = "2", default-features = false, features = ["napi8"] }
 napi-derive = "2"
 

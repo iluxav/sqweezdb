@@ -84,9 +84,9 @@ pub enum Follow { Dir { dir: PathBuf, poll: Duration }, Bucket { source: Backup,
 #[derive(Clone, Debug)]
 pub struct SnapshotPolicy { pub log_bytes: Option<u64>, pub idle_after: Option<Duration> }
 impl Default for SnapshotPolicy { fn default() -> Self { SnapshotPolicy { log_bytes: Some(64 << 20), idle_after: Some(Duration::from_secs(30)) } } }
-/// Doors for other processes: a Unix socket path, a TCP address with its shared token.
+/// Doors for other processes: a Unix socket path, a TCP address, the web console's HTTP address; the last two need the shared token.
 #[derive(Clone, Debug, Default)]
-pub struct Listen { pub socket: Option<PathBuf>, pub tcp: Option<String>, pub token: Option<String> }
+pub struct Listen { pub socket: Option<PathBuf>, pub tcp: Option<String>, pub http: Option<String>, pub token: Option<String> }
 #[derive(Clone, Debug)]
 pub struct LivePolicy { pub debounce: Duration, pub queue: usize }
 impl Default for LivePolicy { fn default() -> Self { LivePolicy { debounce: Duration::from_millis(5), queue: 65536 } } }
@@ -126,7 +126,7 @@ pub struct FollowFile { pub dir: Option<String>, pub bucket: Option<BackupFile>,
 pub struct SnapshotFile { #[serde(alias = "log_bytes")] pub log_bytes: Option<Size>, #[serde(alias = "idle_after")] pub idle_after: Option<Dur> }
 #[derive(Deserialize, Default, Debug, Clone)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ListenFile { pub socket: Option<String>, pub tcp: Option<String>, pub token: Option<String> }
+pub struct ListenFile { pub socket: Option<String>, pub tcp: Option<String>, pub http: Option<String>, pub token: Option<String> }
 #[derive(Deserialize, Default, Debug, Clone)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LiveFile { pub debounce: Option<Dur>, pub queue: Option<usize> }
@@ -145,7 +145,7 @@ impl ConfigFile {
             backup: nest(self.backup, o.backup, |a, b| a.overlay(b)),
             follow: nest(self.follow, o.follow, |a, b| FollowFile { dir: pick(a.dir, b.dir), bucket: nest(a.bucket, b.bucket, |x, y| x.overlay(y)), poll: pick(a.poll, b.poll) }),
             snapshot: nest(self.snapshot, o.snapshot, |a, b| SnapshotFile { log_bytes: pick(a.log_bytes, b.log_bytes), idle_after: pick(a.idle_after, b.idle_after) }),
-            listen: nest(self.listen, o.listen, |a, b| ListenFile { socket: pick(a.socket, b.socket), tcp: pick(a.tcp, b.tcp), token: pick(a.token, b.token) }),
+            listen: nest(self.listen, o.listen, |a, b| ListenFile { socket: pick(a.socket, b.socket), tcp: pick(a.tcp, b.tcp), http: pick(a.http, b.http), token: pick(a.token, b.token) }),
             live: nest(self.live, o.live, |a, b| LiveFile { debounce: pick(a.debounce, b.debounce), queue: pick(a.queue, b.queue) }),
             log: nest(self.log, o.log, |a, b| LogFile { threads_idle_after: pick(a.threads_idle_after, b.threads_idle_after) }),
         }
@@ -174,8 +174,9 @@ impl ConfigFile {
             if let Some(v) = s.idle_after { let d = dur_of(v, "snapshot.idleAfter")?; c.snapshot.idle_after = if d.is_zero() { None } else { Some(d) }; }
         }
         if let Some(l) = self.listen {
-            c.listen.socket = l.socket.map(PathBuf::from); c.listen.tcp = l.tcp; c.listen.token = l.token.filter(|t| !t.is_empty());
+            c.listen.socket = l.socket.map(PathBuf::from); c.listen.tcp = l.tcp; c.listen.http = l.http; c.listen.token = l.token.filter(|t| !t.is_empty());
             if c.listen.tcp.is_some() && c.listen.token.is_none() { return Err("listen.tcp needs listen.token (a shared secret every connection presents first)".into()); }
+            if c.listen.http.is_some() && c.listen.token.is_none() { return Err("listen.http needs listen.token (the web console asks for it)".into()); }
         }
         if let Some(l) = self.live { if let Some(d) = l.debounce { c.live.debounce = dur_of(d, "live.debounce")?; } if let Some(q) = l.queue { c.live.queue = q.max(16); } }
         if let Some(l) = self.log { if let Some(d) = l.threads_idle_after { let d = dur_of(d, "log.threadsIdleAfter")?; c.log.threads_idle_after = if d.is_zero() { None } else { Some(d) }; } }

@@ -2720,6 +2720,7 @@ dependencies = [
  "futures-util",
  "libc",
  "memmap2",
+ "mimalloc",
  "object_store",
  "rusqlite",
  "serde",

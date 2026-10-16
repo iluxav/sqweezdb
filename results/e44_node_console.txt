@@ -1,0 +1,11 @@
+=== E44: the web console inside a Node app (listen.http) ===
+idle, 100k rows: without the console 10 threads 89.7 MB; with it 11 threads 97.4 MB
+event-loop lag (1 ms timer): no console traffic p50 53 us p99 1104 us | console hammered from another process p50 53 us p99 66 us
+the app's own point reads: 0.99M/s alone, 1.04M/s while the console serves 215192 requests
+console point read from another process (HTTP+JSON, keep-alive, Node client): p50 15 us, p99 33 us
+app's db.run -> console live stream (count(*) over 100,100 rows): p50 5.5 ms, p99 5.7 ms (5 ms debounce)
+close() with a live stream, a change tail and a keep-alive connection open: 20.8 ms; both streams ended 979 ms later; port free: true; reopen of the same directory with new options and the same port: ok, durable=true, 100100 rows in 20.6 ms
+opened without listen.http: port 7792 free: true
+idle cost re-measured in fresh processes (the line above compares a reopen after close in one process, which mixes in freed memory):
+without the console: +3 threads, +13.2 MB over bare Node (65.3 MB total)   [3 runs, identical]
+with the console   : +4 threads, +13.3 MB over bare Node (65.4 MB total)   [3 runs, identical]

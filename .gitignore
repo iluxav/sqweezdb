@@ -20,3 +20,6 @@ RESULTS.md
 .DS_Store
 *.swp
 *~
+
+# release tarballs from `make dist`
+/dist/

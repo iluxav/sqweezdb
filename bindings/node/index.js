@@ -170,7 +170,7 @@ class Database {
  * Open or create the database directory. Options are the engine's configuration keys:
  * durable (false | true | 'cloud'), create, backup { endpoint, bucket, prefix, region, accessKey, secretKey,
  * passphrase, interval, compress, compactAfter, compactEvery, bootstrap }, follow { dir | bucket, poll },
- * snapshot { logBytes, idleAfter }, listen { socket, tcp, token }, live { debounce, queue }, log { threadsIdleAfter },
+ * snapshot { logBytes, idleAfter }, listen { socket, tcp, http, token }, live { debounce, queue }, log { threadsIdleAfter },
  * configFile (a TOML file with the same keys, read first and overridden by these options), plus rowMode for this
  * binding. Nothing is read from the data directory itself. Never wipes a directory.
  */

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sqweezdb console</title>
+<style>
+:root { --bg:#f6f7f9; --panel:#fff; --ink:#1b1f24; --muted:#6b7280; --line:#e3e6ea; --accent:#0b6e4f; --accent-ink:#fff; --bad:#b42318; --badbg:#fde8e6; --good:#0b6e4f; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; --sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --panel:#171a21; --ink:#e6e8eb; --muted:#9aa3ad; --line:#2a2f38; --accent:#3dbf8f; --accent-ink:#06130e; --bad:#ff8a80; --badbg:#3a1714; --good:#3dbf8f; } }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 var(--sans) }
+header { display:flex; align-items:center; gap:16px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line) }
+header h1 { font-size:16px; margin:0; letter-spacing:.2px } header .dir { color:var(--muted); font-family:var(--mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 }
+header input { font:13px var(--mono); padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); width:220px }
+button { font:13px var(--sans); padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink); cursor:pointer } button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) } button.on { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) } button:disabled { opacity:.5; cursor:default }
+main { display:grid; grid-template-columns:280px 1fr; gap:16px; padding:16px; min-height:calc(100vh - 53px) }
+@media (max-width: 900px) { main { grid-template-columns:1fr } }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px } .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin:0 0 8px }
+aside { display:flex; flex-direction:column; gap:16px } .tables li { list-style:none; padding:6px 8px; border-radius:6px; cursor:pointer; display:flex; justify-content:space-between; gap:8px } .tables li:hover { background:var(--bg) } .tables li .n { color:var(--muted); font-variant-numeric:tabular-nums } .tables ul { margin:0; padding:0 } .tables small { display:block; color:var(--muted); font-size:11px }
+.kv { display:grid; grid-template-columns:auto 1fr; gap:4px 10px; font-size:13px } .kv b { color:var(--muted); font-weight:500 } .kv span { font-family:var(--mono); font-size:12px; overflow-wrap:anywhere }
+.tabs { display:flex; gap:4px; margin-bottom:12px } .tabs button { border-color:transparent; background:transparent; color:var(--muted) } .tabs button.on { background:var(--panel); color:var(--ink); border-color:var(--line) }
+textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); resize:vertical }
+.row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap } .row input { flex:1; min-width:200px; font:13px var(--mono); padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink) } .meta { color:var(--muted); font-size:12px; margin-left:auto; font-variant-numeric:tabular-nums }
+.err { background:var(--badbg); color:var(--bad); padding:8px 10px; border-radius:6px; font-family:var(--mono); font-size:12px; white-space:pre-wrap } .err b { margin-right:8px }
+.grid { overflow:auto; max-height:60vh; border:1px solid var(--line); border-radius:8px } table { border-collapse:collapse; width:100%; font-size:13px } th, td { text-align:left; padding:5px 10px; border-bottom:1px solid var(--line); white-space:nowrap; font-variant-numeric:tabular-nums } th { position:sticky; top:0; background:var(--panel); font-weight:600; font-size:12px; color:var(--muted) } td.num { text-align:right; font-family:var(--mono); font-size:12px } td.null { color:var(--muted); font-style:italic } tr:hover td { background:var(--bg) }
+.badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:600; background:var(--bg); border:1px solid var(--line) } .badge.live { color:var(--accent); border-color:var(--accent) } .badge.insert { color:var(--good) } .badge.delete { color:var(--bad) } .badge.update { color:#8a6d00 }
+.events { max-height:60vh; overflow:auto; font-family:var(--mono); font-size:12px } .events div { padding:4px 0; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:baseline } .events .k { color:var(--muted) }
+.hidden { display:none } .muted { color:var(--muted) } code { font-family:var(--mono); font-size:12px }
+</style>
+</head>
+<body>
+<header>
+  <h1>sqweezdb</h1>
+  <div class="dir" id="dir">connecting…</div>
+  <input id="token" type="password" placeholder="token" autocomplete="off">
+  <button id="connect" class="primary">Connect</button>
+</header>
+<main>
+  <aside>
+    <section class="panel tables"><h2>Tables</h2><ul id="tables"><li class="muted">—</li></ul></section>
+    <section class="panel"><h2>Status</h2><div class="kv" id="status"></div><div class="row"><button id="snap">Snapshot now</button><span class="meta" id="snapmeta"></span></div></section>
+  </aside>
+  <section>
+    <div class="tabs"><button class="on" data-tab="console">Console</button><button data-tab="changes">Changes</button><button data-tab="acl">Access</button></div>
+    <div id="tab-console" class="panel">
+      <textarea id="sql" spellcheck="false" placeholder="SELECT … (Ctrl+Enter runs)">SELECT count(*) AS rows FROM </textarea>
+      <div class="row"><input id="params" placeholder='parameters as a JSON array, e.g. [42, "alice"]'><button id="run" class="primary">Run</button><button id="live">Live</button><span class="meta" id="meta"></span></div>
+      <div id="err" class="err hidden"></div>
+      <div class="grid"><table id="result"></table></div>
+    </div>
+    <div id="tab-changes" class="panel hidden">
+      <div class="row"><input id="csql" placeholder="SELECT * FROM orders WHERE user_id = 42   (a single-table SELECT: its WHERE is the filter)"><button id="cstart" class="primary">Start</button><span class="meta" id="cmeta"></span></div>
+      <div class="events" id="events"></div>
+    </div>
+    <div id="tab-acl" class="panel hidden">
+      <div class="row"><span class="muted">Roles, users, grants and row policies. Manage them with <code>CREATE ROLE</code>, <code>CREATE USER … IN ROLE … WITH attr = value</code>, <code>GRANT … ON table TO role</code>, <code>CREATE POLICY … USING (col = SESSION.attr)</code> in the console.</span><button id="aclrefresh">Refresh</button></div>
+      <div id="acl"></div>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  let token = ''; try { token = sessionStorage.getItem('sqweezdb.token') || ''; } catch (_) {}
+  $('token').value = token;
+  const fmtBytes = (n) => n == null ? '—' : n < 1e6 ? (n / 1e3).toFixed(0) + ' KB' : n < 1e9 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e9).toFixed(2) + ' GB';
+  async function api(path, opts = {}) {
+    const headers = Object.assign({ Authorization: 'Bearer ' + token }, opts.body ? { 'Content-Type': 'application/json' } : {});
+    const r = await fetch(path, Object.assign({}, opts, { headers }));
+    const body = await r.json().catch(() => ({ error: 'bad response', code: 'ERROR' }));
+    if (r.status === 401) { $('token').focus(); $('dir').textContent = 'token required'; }
+    if (!r.ok) throw Object.assign(new Error(body.error || r.statusText), { code: body.code || 'ERROR' });
+    return body;
+  }
+  // ---- status + tables
+  async function refresh() {
+    try {
+      const st = await api('/api/status');
+      $('dir').textContent = st.dir;
+      const b = st.backup;
+      const rows = [['durability', st.durable], ['log seq', st.seq.toLocaleString()], ['durable seq', st.durableSeq.toLocaleString()], ['log written', fmtBytes(st.logBytes)], ['tables', st.tables], ['snapshots by policy', st.snapshotsByPolicy],
+        ['backup', b ? `${b.bucket} (${b.encrypted ? 'encrypted' : 'plaintext'})` : 'off'], b ? ['bucket behind', b.behind === 0 ? 'in sync' : b.behind.toLocaleString() + ' commits'] : null, b ? ['uploaded', `${b.objects} objects, ${fmtBytes(b.bytes)}`] : null,
+        st.followerApplied != null ? ['follower applied', st.followerApplied.toLocaleString()] : null, st.altersInProgress.length ? ['ALTER in progress', st.altersInProgress.join(', ')] : null,
+        ['listeners', [st.listen.socket, st.listen.tcp, st.listen.http].filter(Boolean).join('  ') || 'none'], st.reactor ? ['live events', `${st.reactor.events.toLocaleString()} (${st.reactor.reruns} re-runs)`] : null].filter(Boolean);
+      $('status').innerHTML = rows.map(([k, v]) => `<b>${esc(k)}</b><span>${esc(v)}</span>`).join('');
+      const ts = await api('/api/tables');
+      $('tables').innerHTML = ts.length ? ts.map((t) => `<li data-name="${esc(t.name)}"><div>${esc(t.name)}<small>${t.columns.map((c) => c.name + (c.pk ? ' 🔑' : '')).join(', ')}</small></div><span class="n">${t.rows < 0 ? '?' : t.rows.toLocaleString()}</span></li>`).join('') : '<li class="muted">no tables yet</li>';
+      for (const li of $('tables').querySelectorAll('li[data-name]')) li.onclick = () => { $('sql').value = `SELECT * FROM ${li.dataset.name} LIMIT 100`; run(); showTab('console'); };
+      if ($('sql').value.trim() === 'SELECT count(*) AS rows FROM' && ts.length) $('sql').value = `SELECT count(*) AS rows FROM ${ts[0].name}`;
+    } catch (e) { $('status').innerHTML = `<b>error</b><span>${esc(e.message)}</span>`; }
+  }
+  // ---- console
+  let live = null;
+  function render(res, meta) {
+    const cols = res.columns || [];
+    const rows = res.rows || []; const shown = rows.slice(0, 1000);
+    const cell = (v) => v === null || v === undefined ? '<td class="null">NULL</td>' : typeof v === 'number' ? `<td class="num">${v}</td>` : `<td>${esc(v)}</td>`;
+    $('result').innerHTML = cols.length ? `<thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${shown.map((r) => `<tr>${r.map(cell).join('')}</tr>`).join('')}</tbody>` : (rows.length ? '' : '<tbody><tr><td class="muted">ok</td></tr></tbody>');
+    $('meta').innerHTML = meta;
+    $('err').classList.add('hidden');
+  }
+  function showErr(e) { $('err').innerHTML = `<b>${esc(e.code || 'ERROR')}</b>${esc(e.message)}`; $('err').classList.remove('hidden'); $('meta').textContent = ''; }
+  function params() { const p = $('params').value.trim(); if (!p) return []; const v = JSON.parse(p); if (!Array.isArray(v)) throw Object.assign(new Error('parameters must be a JSON array'), { code: 'ARGUMENTS' }); return v; }
+  async function run() {
+    stopLive();
+    try { const res = await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql: $('sql').value, params: params() }) });
+      render(res, `${res.count.toLocaleString()} row${res.count === 1 ? '' : 's'} · ${res.ms.toFixed(2)} ms${res.inTransaction ? ' · in transaction' : ''}${res.count > 1000 ? ' · showing 1,000' : ''}`); refresh();
+    } catch (e) { showErr(e); }
+  }
+  function stopLive() { if (live) { live.close(); live = null; $('live').classList.remove('on'); } }
+  function startLive() {
+    stopLive();
+    let p; try { p = params(); } catch (e) { return showErr(e); }
+    const url = `/api/live?sql=${encodeURIComponent($('sql').value)}&params=${encodeURIComponent(JSON.stringify(p))}&token=${encodeURIComponent(token)}`;
+    let n = 0; const t0 = performance.now(); let prev = null;
+    live = new EventSource(url);
+    live.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'rows') { n += m.initial ? 0 : 1;
+        // rows that appeared and disappeared since the last result, compared whole (a changed aggregate row counts once each way)
+        const cur = m.rows.map((r) => JSON.stringify(r)); let diff = '';
+        if (prev) { const a = new Set(prev), b = new Set(cur); const plus = cur.filter((x) => !a.has(x)).length, minus = prev.filter((x) => !b.has(x)).length; diff = ` · last change +${plus} −${minus}`; }
+        prev = cur;
+        render(m, `<span class="badge live">LIVE</span> ${m.rows.length.toLocaleString()} rows · ${n} update${n === 1 ? '' : 's'} in ${((performance.now() - t0) / 1000).toFixed(0)} s${diff}`); } else if (m.type === 'overflow') { showErr({ code: 'OVERFLOW', message: 'the live query fell behind and was dropped; start it again' }); stopLive(); } };
+    live.onerror = () => { showErr({ code: 'ERROR', message: 'live stream closed (bad token, bad SQL, or the server went away)' }); stopLive(); };
+    $('live').classList.add('on');
+  }
+  $('run').onclick = run; $('live').onclick = () => (live ? stopLive() : startLive());
+  $('sql').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
+  $('snap').onclick = async () => { $('snap').disabled = true; try { const s = await api('/api/snapshot', { method: 'POST', body: '{}' }); $('snapmeta').textContent = `${s.rows.toLocaleString()} rows, ${fmtBytes(s.bytes)} in ${(s.secs * 1000).toFixed(0)} ms, ${s.deletedSegments} segments freed`; refresh(); } catch (e) { $('snapmeta').textContent = e.message; } $('snap').disabled = false; };
+  // ---- changes tail
+  let tail = null;
+  $('cstart').onclick = () => {
+    if (tail) { tail.close(); tail = null; $('cstart').textContent = 'Start'; $('cstart').classList.add('primary'); return; }
+    const url = `/api/changes?sql=${encodeURIComponent($('csql').value)}&token=${encodeURIComponent(token)}`; let n = 0;
+    tail = new EventSource(url); $('cstart').textContent = 'Stop'; $('cstart').classList.remove('primary'); $('events').innerHTML = '';
+    tail.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type !== 'change') { if (m.type === 'overflow') $('cmeta').textContent = 'fell behind, dropped'; return; } n++;
+      const row = m.row ? m.columns.map((c, i) => `${c}=${m.row[i] === null ? 'NULL' : JSON.stringify(m.row[i])}`).join(' ') : '';
+      const div = document.createElement('div'); div.innerHTML = `<span class="badge ${m.op}">${m.op}</span><span class="k">${esc(m.table)} #${m.key}</span><span>${esc(row)}</span><span class="k">seq ${m.seq}</span>`;
+      $('events').prepend(div); while ($('events').children.length > 200) $('events').lastChild.remove(); $('cmeta').textContent = `${n} events`; };
+    tail.onerror = () => { $('cmeta').textContent = 'stream closed (bad token or SQL)'; $('cstart').click(); };
+  };
+  // ---- access control
+  async function acl() {
+    try { const a = await api('/api/acl');
+      const tbl = (title, head, rows) => `<h2>${title}</h2><div class="grid" style="max-height:30vh;margin-bottom:12px"><table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('') : `<tr><td class="muted" colspan="${head.length}">none</td></tr>`}</tbody></table></div>`;
+      $('acl').innerHTML = tbl('Users', ['user', 'roles', 'attributes'], a.users.map((u) => [u.name, u.roles.join(', '), Object.entries(u.attrs).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ')]))
+        + tbl('Roles', ['role'], a.roles.map((r) => [r])) + tbl('Grants', ['role', 'table', 'commands'], a.grants.map((g) => [g.role, g.table, g.commands.join(', ')]))
+        + tbl('Row policies', ['policy', 'table', 'role', 'commands', 'using'], a.policies.map((p) => [p.name, p.table, p.role, p.commands.join(', '), p.using]));
+    } catch (e) { $('acl').innerHTML = `<div class="err"><b>${esc(e.code)}</b>${esc(e.message)}</div>`; }
+  }
+  $('aclrefresh').onclick = acl;
+  // ---- tabs, token, timers
+  function showTab(name) { for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('on', b.dataset.tab === name); for (const t of ['console', 'changes', 'acl']) $('tab-' + t).classList.toggle('hidden', t !== name); if (name === 'acl') acl(); }
+  for (const b of document.querySelectorAll('.tabs button')) b.onclick = () => showTab(b.dataset.tab);
+  $('connect').onclick = () => { token = $('token').value.trim(); try { sessionStorage.setItem('sqweezdb.token', token); } catch (_) {} refresh(); };
+  $('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('connect').click(); });
+  refresh(); setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>
