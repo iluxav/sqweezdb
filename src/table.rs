@@ -103,27 +103,34 @@ pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub written: u64, pub dura
 /// Writing and syncing are two threads: records reach the segment file (and so followers and change feeds) as soon as
 /// they are appended, independent of how long the current fsync takes; durability still comes from one fsync per batch.
 pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub cv_sync: Condvar, pub dir: PathBuf, /// live in-process change feeds; the memory ring is only kept while there is at least one
-    pub feeds: std::sync::atomic::AtomicUsize }
+    pub feeds: std::sync::atomic::AtomicUsize, /// signalled on an append while a reactor is waiting (never costs the writer otherwise)
+    pub cv_feed: Condvar, pub feed_wake: std::sync::atomic::AtomicBool }
 impl GLog {
-    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0, cloud: 0, cloud_wait: false, cloud_kick: None }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0) } }
+    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 22), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0, cloud: 0, cloud_wait: false, cloud_kick: None }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0), cv_feed: Condvar::new(), feed_wake: std::sync::atomic::AtomicBool::new(false) } }
     pub fn seg_path(&self, first: u64) -> PathBuf { Self::seg_path_in(&self.dir, first) }
     pub fn seg_path_in(dir: &Path, first: u64) -> PathBuf { dir.join(format!("log.{first:020}")) }
     pub fn list_segments(dir: &Path) -> Vec<u64> {
         let mut v: Vec<u64> = fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("log.").and_then(|x| x.parse().ok()))).collect()).unwrap_or_default();
         v.sort(); v
     }
-    fn push_record(&self, s: &mut LogState, op: u8, table: u16, payload: &[u8]) -> u64 {
+    fn push_record(&self, s: &mut LogState, op: u8, table: u16, payload: &[u8]) -> u64 { self.push_record2(s, op, table, payload, None) }
+    /// `ring` is what in-process feeds see for this record when it differs from the log payload (deletes carry the old row).
+    fn push_record2(&self, s: &mut LogState, op: u8, table: u16, payload: &[u8], ring: Option<&[u8]>) -> u64 {
         s.seq += 1; let seq = s.seq;
         let mut body = Vec::with_capacity(11 + payload.len());
         body.extend_from_slice(&seq.to_le_bytes()); body.push(op); body.extend_from_slice(&table.to_le_bytes()); body.extend_from_slice(payload);
         let crc = crc32(&body);
         s.buf.extend_from_slice(&(body.len() as u32).to_le_bytes()); s.buf.extend_from_slice(&crc.to_le_bytes()); s.buf.extend_from_slice(&body);
-        if self.feeds.load(Ordering::Relaxed) > 0 { s.recent.push_back((seq, op, table, Arc::from(payload))); s.recent_bytes += payload.len(); while s.recent_bytes > RECENT_CAP && s.recent.len() > 1 { if let Some((_, _, _, p)) = s.recent.pop_front() { s.recent_bytes -= p.len(); } } }
+        if self.feeds.load(Ordering::Relaxed) > 0 { let rp = ring.unwrap_or(payload); s.recent.push_back((seq, op, table, Arc::from(rp))); s.recent_bytes += rp.len(); while s.recent_bytes > RECENT_CAP && s.recent.len() > 1 { if let Some((_, _, _, p)) = s.recent.pop_front() { s.recent_bytes -= p.len(); } } if self.feed_wake.swap(false, Ordering::AcqRel) { self.cv_feed.notify_all(); } }  // one wake per reactor sleep, paid by one append
         else if !s.recent.is_empty() { s.recent.clear(); s.recent_bytes = 0; }
         seq
     }
     /// record: [len u32][crc32c u32][seq u64][op u8][table u16][payload]
     pub fn append(&self, op: u8, table: u16, payload: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record(&mut s, op, table, payload); self.cv_batch.notify_one(); seq }
+    /// Append with a different payload for in-process feeds (a delete logs the key, feeds get the old row).
+    pub fn append_with_ring(&self, op: u8, table: u16, payload: &[u8], ring: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record2(&mut s, op, table, payload, Some(ring)); self.cv_batch.notify_one(); seq }
+    /// Block until a record after `last_seq` exists or the timeout passes; returns the current sequence.
+    pub fn wait_feed(&self, last_seq: u64, timeout: std::time::Duration) -> u64 { let mut s = self.st.lock().unwrap(); if s.seq <= last_seq { self.feed_wake.store(true, Ordering::Release); let (g, _) = self.cv_feed.wait_timeout(s, timeout).unwrap(); s = g; self.feed_wake.store(false, Ordering::Release); } s.seq }
     /// A DDL or ACL statement: appended to the log and to the in-memory catalog under one lock, so a snapshot
     /// taken at sequence S sees exactly the statements with sequence <= S.
     pub fn append_meta(&self, text: &str) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record(&mut s, OP_META, u16::MAX, text.as_bytes()); s.catalog.push(text.to_string()); self.cv_batch.notify_one(); seq }
@@ -133,7 +140,9 @@ impl GLog {
         let s = self.st.lock().unwrap();
         let upto = if durable_only { s.durable } else { s.seq };
         match s.recent.front() { None => return (vec![], last >= s.seq), Some(f) if f.0 > last + 1 => return (vec![], false), _ => {} }
-        let out: Vec<_> = s.recent.iter().filter(|r| r.0 > last && r.0 <= upto).cloned().collect();
+        // sequences are increasing in the ring: binary-search the first record after `last`, copy only the tail
+        let (a, b) = s.recent.as_slices(); let start = if a.last().map(|r| r.0 <= last).unwrap_or(false) { a.len() + b.partition_point(|r| r.0 <= last) } else { a.partition_point(|r| r.0 <= last) };
+        let out: Vec<_> = s.recent.iter().skip(start).take_while(|r| r.0 <= upto).cloned().collect();
         (out, true)
     }
     pub fn snapshot_point(&self) -> (u64, Vec<String>) { let mut s = self.st.lock().unwrap(); s.rotate = true; self.cv_batch.notify_one(); (s.seq, s.catalog.clone()) }
@@ -445,7 +454,7 @@ impl Table {
             let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride);
             let (v, p) = Self::hdr_at(d, off); if v == 0 || self.pk_of(&d[off + 16..off + self.stride]) != pk { return Err(Abort::NotFound); } if p != 0 { return Err(Abort::Conflict); }
             let row = d[off + 16..off + self.stride].to_vec();
-            let seq = self.log.append(OP_DELETE, self.id, &pk.to_le_bytes()); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
+            let seq = self.log.append_with_ring(OP_DELETE, self.id, &pk.to_le_bytes(), &row); d[off + 8..off + 16].copy_from_slice(&seq.to_le_bytes()); (seq, row) };
         self.log.wait_commit(seq, self.durable);
         { let mut c = self.chunks[ck].write().unwrap(); let d = Self::alloc(&mut c, self.stride); d[off..off + 16].copy_from_slice(&[0u8; 16]); }
         match guard { Some(mut m) => { m.remove(&pk); drop(m); if let Some(k) = self.unique_key(&row) { self.uniq_remove(k, slot); } self.idx_remove(&row, slot); } None => self.unpublish(slot, &row) }
@@ -1043,8 +1052,10 @@ impl Database {
                 if cv != *v || (cp != 0 && cp != mark) { drop(guards); undo(&txn, claimed); return Err(Abort::Conflict); }
             }
             let mut payload = Vec::with_capacity(txn.writes.iter().map(|w| w.row().len() + 7).sum());
-            for w in &txn.writes { let key; let bytes: &[u8] = if let TxnWrite::Delete { table, row, .. } = w { key = table.pk_of(row).to_le_bytes(); &key } else { w.row() }; payload.extend_from_slice(&w.table().id.to_le_bytes()); payload.push(w.op()); payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); payload.extend_from_slice(bytes); }
-            seq = self.log.append(OP_TXN, u16::MAX, &payload);
+            let mut ring = Vec::with_capacity(payload.capacity() + 64);
+            for w in &txn.writes { let key; let bytes: &[u8] = if let TxnWrite::Delete { table, row, .. } = w { key = table.pk_of(row).to_le_bytes(); &key } else { w.row() }; payload.extend_from_slice(&w.table().id.to_le_bytes()); payload.push(w.op()); payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); payload.extend_from_slice(bytes);
+                                    ring.extend_from_slice(&w.table().id.to_le_bytes()); ring.push(w.op()); ring.extend_from_slice(&(w.row().len() as u32).to_le_bytes()); ring.extend_from_slice(w.row()); }
+            seq = self.log.append_with_ring(OP_TXN, u16::MAX, &payload, &ring);
             for w in &txn.writes {
                 let (t, slot) = (w.table(), w.slot());
                 let i = idx(t.id, slot as usize / CHUNK_ROWS); let d = t.alloc_in(&mut guards[i]); let off = (slot as usize % CHUNK_ROWS) * t.stride;

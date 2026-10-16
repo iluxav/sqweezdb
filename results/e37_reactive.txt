@@ -1,0 +1,12 @@
+=== E37: reactivity (100k users; orders inserted at full speed; subscribers filter by user) ===
+A. writer alone: 886950 inserts/s (2660851 rows)
+A.  1000 filtered subscribers: writer 865044 inserts/s (98% of alone); 25943 events delivered (expected ~25951); commit -> subscriber p50 78 us, p99 163 us
+A. 10000 filtered subscribers: writer 909229 inserts/s (103% of alone); 273201 events delivered (expected ~272769); commit -> subscriber p50 61 us, p99 117 us
+A. one subscriber, blocking receive, 1000 single inserts: commit -> event p50 6 us, p99 17 us (the fan-out rows above include a 100 us polling sleep in the test's collector)
+A. 200 subscribers on one hot user, writer 161088 inserts/s of that user: 25236622 events delivered of 64435400 (0 subscribers overflowed and were dropped)
+B. tenant u7 subscribed to all of orders with policy user_id = SESSION.uid: 10,000 inserts (201 for user 7) and 10 deletes (5 of user 7) -> received 201 inserts, 5 deletes, 0 events of other users
+C. live aggregate for one user, 100 inserts one by one: result now [Int(370), Float(34951.0)]; insert -> new result p50 5.1 ms, p99 5.3 ms (debounce 5 ms)
+C. live top-3 for user 7 (was 3 rows): a new top order -> event with 1 added, 1 removed; an order for another user -> event: false
+C. live GROUP BY over the whole table (2583796 rows) under a 861265 inserts/s burst: 85 re-runs in 3.1 s (27.4/s, 31.8 ms each, 87% of one core), 47 result updates delivered; writer unaffected (2583796 rows)
+D. second process subscribed over the socket to user 42: 1000 of 1000 events received; commit -> event in the other process p50 11 us, p99 46 us
+E. sqlite3_update_hook: 8.2 us per insert without, 8.4 us with the hook (100000 callbacks); it reports table + rowid only, in the writer's thread, same process; no filter, no policy, no live query, no other process

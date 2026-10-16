@@ -14,7 +14,7 @@ pub struct Rows { rows: Vec<Vec<Value>>, strings: Vec<CString> }
 #[repr(C)] #[derive(Clone, Copy)] pub struct CValue { pub tag: c_int, pub i: i64, pub f: f64, pub ptr: *const u8, pub len: usize }
 
 fn set_err(db: &Db, e: String) { *db.err.lock().unwrap() = CString::new(e.replace('\0', " ")).unwrap(); }
-unsafe fn cstr(p: *const c_char) -> String { if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() } }
+unsafe fn cstr(p: *const c_char) -> String { if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() } }
 fn to_value(v: &CValue) -> Value { unsafe { match v.tag { 1 => Value::Int(v.i), 2 => Value::Float(v.f), 3 => Value::Text(String::from_utf8_lossy(std::slice::from_raw_parts(v.ptr, v.len)).into_owned()), 4 => Value::Bytes(std::slice::from_raw_parts(v.ptr, v.len).to_vec()), 5 => Value::Bool(v.i != 0), _ => Value::Null } } }
 
 /// Open (or create) a database directory. `durable` != 0 waits for the disk on every commit. Null on failure.

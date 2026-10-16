@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
 
-const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4;
+const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4; const K_SUB: u8 = 5;
 // shared-memory ring: one outstanding request per connection, both sides spin briefly then back off
 const SHM_SIZE: usize = 2 << 20; const REQ_OFF: usize = 64; const REQ_CAP: usize = 1 << 20; const RESP_OFF: usize = REQ_OFF + REQ_CAP; const RESP_CAP: usize = SHM_SIZE - RESP_OFF;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -123,6 +123,20 @@ impl Server {
                 };
                 encode_result(&mut out, &r); write_frame(&mut w, &out)?; continue;
             }
+            if req[0] == K_SUB {
+                // a subscription connection: acknowledge, then push one frame per event until the client goes away
+                let mut p = 1; let sub = match decode_exec(&req, &mut p).and_then(|(s, ps)| sql.reactor().subscribe(&sess, &s, &ps)) { Ok(sub) => { encode_result(&mut out, &Ok(vec![])); write_frame(&mut w, &out)?; sub } Err(e) => { encode_result(&mut out, &Err(e)); write_frame(&mut w, &out)?; continue; } };
+                loop {
+                    let Some(ev) = sub.recv_timeout(std::time::Duration::from_millis(200)) else { continue };
+                    out.clear();
+                    match ev {
+                        crate::live::Event::Change(c) => { let mut row = vec![Value::Int(match c.op { crate::sql::ChangeOp::Insert => 1, crate::sql::ChangeOp::Update => 2, crate::sql::ChangeOp::Delete => 3 }), Value::Text(c.table.clone()), Value::Int(c.pk)]; if let Some(r) = &c.row { row.extend(r.iter().cloned()); } encode_result(&mut out, &Ok(vec![row])); }
+                        crate::live::Event::Overflow { last_seq } => encode_result(&mut out, &Err(format!("subscription overflow at {last_seq}; resubscribe"))),
+                        crate::live::Event::Live { .. } => continue,
+                    }
+                    if write_frame(&mut w, &out).is_err() { return Ok(()); }
+                }
+            }
             dispatch(&sql, &mut sess, &req, &mut out);
             write_frame(&mut w, &out)?;
         }
@@ -166,6 +180,9 @@ impl Client {
         for _ in 0..stmts.len() { out.push(decode_result(&resp, &mut p)); }
         Ok(out)
     }
+    /// Turn this connection into a subscription: events arrive through `next_event` as rows [op, table, key, columns...].
+    pub fn subscribe(&mut self, sql: &str, params: &[Value]) -> Result<(), String> { self.buf.clear(); self.buf.push(K_SUB); encode_exec(&mut self.buf, sql, params); write_frame(&mut self.w, &self.buf).map_err(|e| e.to_string())?; let resp = read_frame(&mut self.r).map_err(|e| e.to_string())?; decode_result(&resp, &mut 0).map(|_| ()) }
+    pub fn next_event(&mut self) -> Result<Vec<Value>, String> { let resp = read_frame(&mut self.r).map_err(|e| e.to_string())?; decode_result(&resp, &mut 0).map(|mut r| r.pop().unwrap_or_default()) }
     fn round_trip(&mut self) -> Result<Vec<u8>, String> {
         if let Some((ring, seq, _)) = &mut self.ring {
             if self.buf.len() > REQ_CAP { return Err("request too large for the ring".into()); }

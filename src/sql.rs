@@ -535,7 +535,9 @@ impl<'a> Sink<'a> {
     }
 }
 
-pub struct Sql { pub db: Arc<Database>, cache: Arc<Mutex<HashMap<String, Arc<Prepared>>>>, pub acl: std::sync::RwLock<Acl>, pub epoch: Arc<std::sync::atomic::AtomicU64>, alters: Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>> }
+pub struct Sql { pub db: Arc<Database>, cache: Arc<Mutex<HashMap<String, Arc<Prepared>>>>, pub acl: std::sync::RwLock<Acl>, pub epoch: Arc<std::sync::atomic::AtomicU64>, alters: Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>>, pub live: std::sync::OnceLock<Arc<crate::live::Reactor>> }
+impl Sql { /// The reactive layer for this database (started on first use).
+    pub fn reactor(self: &Arc<Self>) -> Arc<crate::live::Reactor> { self.live.get_or_init(|| crate::live::Reactor::start(self.clone())).clone() } }
 /// One committed change, decoded against the table's schema.
 #[derive(Debug, Clone, PartialEq)] pub enum ChangeOp { Insert, Update, Delete }
 #[derive(Debug, Clone)] pub struct Change { pub seq: u64, pub table: String, pub op: ChangeOp, pub pk: i64, pub row: Option<Vec<Value>> }
@@ -545,33 +547,37 @@ pub struct Feed { cursor: LogCursor, db: Arc<Database>, last: u64, on_ring: bool
 impl Drop for Feed { fn drop(&mut self) { self.db.log.feeds.fetch_sub(1, std::sync::atomic::Ordering::Relaxed); } }
 impl Feed {
     pub fn last_seq(&self) -> u64 { self.last }
-    fn decode(&self, seq: u64, tid: u16, op: u8, payload: &[u8], out: &mut Vec<Change>) {
-        let Some(t) = self.db.table_by_id(tid) else { return };
-        let (since, until) = (t.owner_since.load(std::sync::atomic::Ordering::Relaxed), t.owner_until.load(std::sync::atomic::Ordering::Relaxed));
-        if seq < since || seq >= until { return; }  // written to a shadow before it took the name, or to a retired table after
-        match op {
-            OP_DELETE => { let pk = if payload.len() == 8 { i64::from_le_bytes(payload.try_into().unwrap()) } else { t.pk_of(payload) }; out.push(Change { seq, table: t.schema.name.clone(), op: ChangeOp::Delete, pk, row: None }); }
-            OP_INSERT | OP_UPDATE => { if payload.len() != t.schema.row_size { return; } let row: Vec<Value> = (0..t.schema.columns.len()).map(|i| decode_col(&t.schema, payload, i)).collect(); out.push(Change { seq, table: t.schema.name.clone(), op: if op == OP_INSERT { ChangeOp::Insert } else { ChangeOp::Update }, pk: t.pk_of(payload), row: Some(row) }); }
-            _ => {}
-        }
-    }
-    /// New changes since the last poll (empty if none yet). In-process: served from the log's memory ring the moment a
-    /// record is committed (durable mode: once it is durable); the files are read only to catch up after a gap.
-    pub fn poll(&mut self) -> Vec<Change> {
+    /// Raw records since the last poll, flattened (transactions become one entry per write), owner-filtered: (seq, table, op, payload).
+    pub fn poll_raw(&mut self) -> Vec<(u64, Arc<Table>, u8, Vec<u8>)> {
         let durable_only = self.db.durable;
         let (ring, ok) = self.db.log.recent_after(self.last, durable_only);
         let recs: Vec<(u64, u8, u16, Vec<u8>)> = if ok { self.on_ring = true; ring.into_iter().map(|(a, b, c, p)| (a, b, c, p.to_vec())).collect() }
             else { if self.on_ring { self.cursor = LogCursor::new(&self.db.dir, self.last); self.on_ring = false; } let upto = if durable_only { self.db.log.st.lock().unwrap().durable } else { u64::MAX }; self.cursor.poll_upto(upto) };
         let mut out = vec![];
+        let mut push = |seq: u64, tid: u16, op: u8, payload: &[u8], out: &mut Vec<(u64, Arc<Table>, u8, Vec<u8>)>| { if let Some(t) = self.db.table_by_id(tid) { let (since, until) = (t.owner_since.load(std::sync::atomic::Ordering::Relaxed), t.owner_until.load(std::sync::atomic::Ordering::Relaxed)); if seq >= since && seq < until { out.push((seq, t, op, payload.to_vec())); } } };
         for (seq, op, tid, payload) in recs {
             self.last = self.last.max(seq);
             match op {
-                OP_TXN => { let mut p = 0; while p + 7 <= payload.len() { let t2 = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap()); let op2 = payload[p + 2]; let len = u32::from_le_bytes(payload[p + 3..p + 7].try_into().unwrap()) as usize; p += 7; self.decode(seq, t2, op2, &payload[p..p + len], &mut out); p += len; } }
+                OP_TXN => { let mut p = 0; while p + 7 <= payload.len() { let t2 = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap()); let op2 = payload[p + 2]; let len = u32::from_le_bytes(payload[p + 3..p + 7].try_into().unwrap()) as usize; p += 7; push(seq, t2, op2, &payload[p..p + len], &mut out); p += len; } }
                 OP_META => {}
-                _ => self.decode(seq, tid, op, &payload, &mut out),
+                _ => push(seq, tid, op, &payload, &mut out),
             }
         }
         out
+    }
+    /// Decoded changes since the last poll (empty if none yet). In-process: served from the log's memory ring the moment a
+    /// record is committed (durable mode: once it is durable); the files are read only to catch up after a gap.
+    pub fn poll(&mut self) -> Vec<Change> {
+        let mut out = vec![];
+        for (seq, t, op, payload) in self.poll_raw() { self.decode_owned(seq, &t, op, &payload, &mut out); }
+        out
+    }
+    fn decode_owned(&self, seq: u64, t: &Arc<Table>, op: u8, payload: &[u8], out: &mut Vec<Change>) {
+        match op {
+            OP_DELETE => { let pk = if payload.len() == 8 { i64::from_le_bytes(payload.try_into().unwrap()) } else { t.pk_of(payload) }; let row = if payload.len() == t.schema.row_size { Some((0..t.schema.columns.len()).map(|i| decode_col(&t.schema, payload, i)).collect()) } else { None }; out.push(Change { seq, table: t.schema.name.clone(), op: ChangeOp::Delete, pk, row }); }
+            OP_INSERT | OP_UPDATE => { if payload.len() != t.schema.row_size { return; } let row: Vec<Value> = (0..t.schema.columns.len()).map(|i| decode_col(&t.schema, payload, i)).collect(); out.push(Change { seq, table: t.schema.name.clone(), op: if op == OP_INSERT { ChangeOp::Insert } else { ChangeOp::Update }, pk: t.pk_of(payload), row: Some(row) }); }
+            _ => {}
+        }
     }
 }
 /// Handle on a follower's replication thread.
@@ -579,7 +585,7 @@ pub struct Follower { pub applied: Arc<std::sync::atomic::AtomicU64>, stop: Arc<
 impl Follower { pub fn applied(&self) -> u64 { self.applied.load(std::sync::atomic::Ordering::Acquire) } }
 impl Drop for Follower { fn drop(&mut self) { self.stop.store(true, std::sync::atomic::Ordering::Relaxed); if let Some(h) = self.thread.take() { h.join().ok(); } } }
 impl Sql {
-    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Arc::new(Mutex::new(HashMap::new())), acl: std::sync::RwLock::new(Acl::default()), epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)), alters: Mutex::new(vec![]) } }
+    pub fn new(db: Arc<Database>) -> Sql { Sql { db, cache: Arc::new(Mutex::new(HashMap::new())), acl: std::sync::RwLock::new(Acl::default()), epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)), alters: Mutex::new(vec![]), live: std::sync::OnceLock::new() } }
     /// Build the new schema and the old-row -> new-row converter for a list of ALTER operations.
     fn alter_schema(old: &Schema, ops: &[AlterOp]) -> Result<(Schema, Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>), String> {
         // working list: (column, source: Some(old index) | None, default, retyped from old type)
@@ -771,7 +777,7 @@ impl Sql {
         }
     }
     /// Privilege check + compiled row policies for this session on a table. None = unrestricted session.
-    fn guard(&self, sess: &Session, table: &Table, cmd: u8) -> Result<Vec<CPred>, String> {
+    pub fn guard(&self, sess: &Session, table: &Table, cmd: u8) -> Result<Vec<CPred>, String> {
         let user = match &sess.user { None => return Ok(vec![]), Some(u) => u };
         let acl = self.acl.read().unwrap();
         let tname = table.schema.name.to_lowercase();
@@ -809,7 +815,7 @@ impl Sql {
             _ => Err("a list or subquery is not a value".into()),
         }
     }
-    fn compile(&self, sess: &Session, schema: &Schema, p: &Pred, params: &[Value]) -> Result<CPred, String> {
+    pub fn compile(&self, sess: &Session, schema: &Schema, p: &Pred, params: &[Value]) -> Result<CPred, String> {
         let off = schema.offsets[p.col]; let c = &schema.columns[p.col];
         let (nb, nm) = (p.col >> 3, 1u8 << (p.col & 7));
         let base = CPred { off, kind: 0, cmp: p.cmp, i: 0, f: 0.0, b: vec![], nb, nm, set: None, pair: None, corr_map: None, ckind: 0 };

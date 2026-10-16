@@ -9,7 +9,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 memmap2 = "0.9.11"
-rusqlite = { version = "0.40.2", features = ["backup"] }
+rusqlite = { version = "0.40.2", features = ["backup", "hooks"] }
 sqlparser = "0.63.0"
 turso = "0.8.3"
 tokio = { version = "1", features = ["rt", "macros"] }
