@@ -146,15 +146,18 @@ doubles as its reference; the declarations are in its cgo preamble.
 
 ## Configuration
 
-Every binding opens with the same keys. Options passed from code win over a `sqweezdb.toml` in the
-database directory, which wins over the defaults. Strings in the file may reference environment
-variables as `${NAME}`; an unset variable is an error, and nothing is read from the environment
-unless the file asks for it. Durations are `'5ms'`, `'1s'`, `'2m'`, `'1h'`, `'7d'` or milliseconds;
-sizes are `'256MB'`, `'1GB'` or bytes; `0` turns a policy off. An unknown key is an error, so typos
-do not silently disable anything.
+Every binding opens with the same keys. Options passed from code win over a TOML file the
+application names with `configFile`, which wins over the defaults. The data directory itself is
+never read for configuration: a directory someone else can write to must not be able to redirect
+your backups, open a listener or read your environment. Strings in the file may reference
+environment variables as `${NAME}`; an unset variable is an error, and nothing is read from the
+environment unless the named file asks for it. Durations are `'5ms'`, `'1s'`, `'2m'`, `'1h'`, `'7d'`
+or milliseconds; sizes are `'256MB'`, `'1GB'` or bytes; `0` turns a policy off. An unknown key is an
+error, so typos do not silently disable anything.
 
 ```js
 const db = open('./data', {
+  configFile: '/etc/sqweezdb/orders.toml',   // optional: the same keys from a file you choose; these options win
   durable: false,            // false: writes return when visible, `durable` promises cover the fsync
                              // true: every commit waits for its fsync (concurrent writers share one)
                              // 'cloud': every commit waits until the bucket has it
@@ -176,10 +179,10 @@ const db = open('./data', {
 })
 ```
 
-The same document as a file, for operators:
+The same document as a file, for operators, named from code with `configFile`:
 
 ```toml
-# ./data/sqweezdb.toml
+# /etc/sqweezdb/orders.toml
 durable = true
 
 [backup]

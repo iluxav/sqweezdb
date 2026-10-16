@@ -82,7 +82,7 @@ fn pack(cols: &Cols, rows: &[Vec<Value>]) -> Vec<u8> {
 
 #[napi] pub struct Db { sql: Mutex<Option<Arc<Sql>>>, durable: bool }
 #[napi] pub struct Stmt { p: Arc<Prepared>, cols: Cols, kind: u8 }
-#[napi] pub struct Sess { sql: Arc<Sql>, s: Arc<Mutex<Session>> }
+#[napi] pub struct Sess { sql: Weak<Sql>, s: Arc<Mutex<Session>> }   // weak: a session must not keep a closed database alive
 #[napi] pub struct Sub { stop: Arc<AtomicBool>, tsfn: Option<ThreadsafeFunction<Payload, ErrorStrategy::Fatal>>, cols: Arc<Cols>, initial: Vec<Vec<Value>> }
 enum Payload { Change(Arc<sql::Change>), Live { rows: Vec<Vec<Value>>, added: Vec<Vec<Value>>, removed: Vec<Vec<Value>> }, Overflow(u64) }
 
@@ -106,7 +106,7 @@ pub fn open(path: String, options: Option<String>) -> Result<Db> {
         let kind = match &p.plan { sql::Plan::Select(_) => 1, sql::Plan::Insert { .. } | sql::Plan::Update { .. } => 2, sql::Plan::Delete { .. } => 3, _ => 0 };
         Ok(Stmt { p, cols, kind })
     }
-    #[napi] pub fn session(&self) -> Result<Sess> { Ok(Sess { sql: self.sql()?, s: Arc::new(Mutex::new(Session::default())) }) }
+    #[napi] pub fn session(&self) -> Result<Sess> { Ok(Sess { sql: Arc::downgrade(&self.sql()?), s: Arc::new(Mutex::new(Session::default())) }) }
     #[napi] pub fn close(&self) { if let Some(s) = self.sql.lock().unwrap().take() { s.close(); } }
     #[napi] pub fn is_durable(&self) -> bool { self.durable }
     #[napi] pub fn rows(&self) -> Result<f64> { Ok(self.sql()?.snapshot().rows as f64) }
@@ -118,54 +118,55 @@ pub fn open(path: String, options: Option<String>) -> Result<Db> {
     #[napi] pub fn kind(&self) -> u32 { self.kind as u32 }
 }
 #[napi] impl Sess {
-    #[napi] pub fn login(&self, user: String) -> Result<()> { self.sql.login(&mut self.s.lock().unwrap(), &user).map_err(err) }
+    fn sql(&self) -> Result<Arc<Sql>> { self.sql.upgrade().ok_or_else(|| err_code("CLOSED", "database is closed")) }
+    #[napi] pub fn login(&self, user: String) -> Result<()> { self.sql()?.login(&mut self.s.lock().unwrap(), &user).map_err(err) }
     #[napi] pub fn in_txn(&self) -> bool { self.s.lock().unwrap().txn.is_some() }
     #[napi] pub fn last_seq(&self) -> f64 { self.s.lock().unwrap().last_seq as f64 }
     #[napi(ts_return_type = "Array<Record<string, unknown>>")] pub fn all(&self, env: Env, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<JsObject> {
-        let vals = params(args)?; let rows = self.sql.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?; rows_arr(&env, &stmt.cols, &rows)
+        let vals = params(args)?; let rows = self.sql()?.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?; rows_arr(&env, &stmt.cols, &rows)
     }
     #[napi(ts_return_type = "Record<string, unknown> | null")] pub fn get(&self, env: Env, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<JsUnknown> {
-        let vals = params(args)?; let rows = self.sql.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?;
+        let vals = params(args)?; let rows = self.sql()?.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?;
         match rows.first() { Some(r) => Ok(row_obj(&env, &stmt.cols, r)?.into_unknown()), None => Ok(env.get_null()?.into_unknown()) }
     }
     /// A write. Returns the commit's sequence (0 when no commit happened, i.e. inside a transaction); a DELETE returns
     /// -(rows deleted) - 1 instead, and index.js asks for the sequence separately.
     #[napi] pub fn run(&self, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<f64> {
         let vals = params(args)?; let mut s = self.s.lock().unwrap(); let before = s.last_seq;
-        let rows = self.sql.execute_s(&mut s, &stmt.p, &vals).map_err(err)?;
+        let rows = self.sql()?.execute_s(&mut s, &stmt.p, &vals).map_err(err)?;
         if stmt.kind == 3 { return Ok(-(rows.first().and_then(|r| r.first()).map(|v| if let Value::Int(n) = v { *n as f64 } else { 0.0 }).unwrap_or(0.0)) - 1.0); }
         Ok(if s.last_seq != before { s.last_seq as f64 } else { 0.0 })
     }
     /// The rows of a SELECT as one packed frame (see `pack`); index.js turns it into objects.
     #[napi] pub fn packed(&self, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<Buffer> {
-        let vals = params(args)?; let rows = self.sql.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?;
+        let vals = params(args)?; let rows = self.sql()?.execute_s(&mut self.s.lock().unwrap(), &stmt.p, &vals).map_err(err)?;
         Ok(pack(&stmt.cols, &rows).into())
     }
     /// SQL text, any statement; rows as objects (empty for writes and DDL).
     #[napi(ts_return_type = "Array<Record<string, unknown>>")] pub fn exec(&self, env: Env, text: String, args: Vec<JsUnknown>) -> Result<JsObject> {
         let vals = params(args)?; let mut s = self.s.lock().unwrap();
-        let rows = self.sql.exec_s(&mut s, &text, &vals).map_err(err)?;
-        let cols = if rows.is_empty() { vec![] } else { self.sql.prepare(&text).map(|p| self.sql.columns(&p)).unwrap_or_default() };
+        let sql = self.sql()?; let rows = sql.exec_s(&mut s, &text, &vals).map_err(err)?;
+        let cols = if rows.is_empty() { vec![] } else { sql.prepare(&text).map(|p| sql.columns(&p)).unwrap_or_default() };
         rows_arr(&env, &cols, &rows)
     }
     /// A SELECT off the JavaScript thread (long scans); resolves with the rows.
     #[napi(ts_return_type = "Promise<Array<Record<string, unknown>>>")] pub fn all_async(&self, stmt: &Stmt, args: Vec<JsUnknown>) -> Result<AsyncTask<Run>> {
-        Ok(AsyncTask::new(Run { sql: self.sql.clone(), s: self.s.clone(), p: stmt.p.clone(), cols: stmt.cols.clone(), vals: params(args)? }))
+        Ok(AsyncTask::new(Run { sql: self.sql()?, s: self.s.clone(), p: stmt.p.clone(), cols: stmt.cols.clone(), vals: params(args)? }))
     }
     /// Push every change a single-table SELECT would see to `callback` as { type:'change', op, table, key, seq, row }.
     #[napi] pub fn subscribe(&self, text: String, args: Vec<JsUnknown>, callback: JsFunction) -> Result<Sub> {
-        let vals = params(args)?; let sub = self.sql.reactor().subscribe(&self.s.lock().unwrap(), &text, &vals).map_err(err)?;
-        start_push(self.sql.clone(), sub, Arc::new(vec![]), vec![], callback)
+        let vals = params(args)?; let sub = self.sql()?.reactor().subscribe(&self.s.lock().unwrap(), &text, &vals).map_err(err)?;
+        start_push(self.sql()?, sub, Arc::new(vec![]), vec![], callback)
     }
     /// Watch any SELECT: the current rows are in `initial()`, then { type:'live', rows, added, removed } on every change.
     #[napi] pub fn watch(&self, text: String, args: Vec<JsUnknown>, callback: JsFunction) -> Result<Sub> {
-        let vals = params(args)?; let cols = self.sql.prepare(&text).map(|p| self.sql.columns(&p)).unwrap_or_default();
-        let (sub, rows) = self.sql.reactor().watch(&self.s.lock().unwrap(), &text, &vals).map_err(err)?;
-        start_push(self.sql.clone(), sub, Arc::new(cols), rows, callback)
+        let vals = params(args)?; let sql = self.sql()?; let cols = sql.prepare(&text).map(|p| sql.columns(&p)).unwrap_or_default();
+        let (sub, rows) = self.sql()?.reactor().watch(&self.s.lock().unwrap(), &text, &vals).map_err(err)?;
+        start_push(self.sql()?, sub, Arc::new(cols), rows, callback)
     }
 }
 fn start_push(sql: Arc<Sql>, sub: sqweezdb::live::Subscription, cols: Arc<Cols>, initial: Vec<Vec<Value>>, callback: JsFunction) -> Result<Sub> {
-    let (sql2, cols2) = (sql.clone(), cols.clone()); let mut table_cols: HashMap<String, Cols> = HashMap::new();
+    let (sql2, cols2) = (Arc::downgrade(&sql), cols.clone()); let mut table_cols: HashMap<String, Cols> = HashMap::new();   // weak: an open subscription must not keep a closed database alive
     let tsfn: ThreadsafeFunction<Payload, ErrorStrategy::Fatal> = callback.create_threadsafe_function(0, move |ctx: ThreadSafeCallContext<Payload>| {
         let env = ctx.env; let mut o = env.create_object()?;
         match ctx.value {
@@ -176,7 +177,7 @@ fn start_push(sql: Arc<Sql>, sub: sqweezdb::live::Subscription, cols: Arc<Cols>,
                 o.set_named_property("key", env.create_double(c.pk as f64)?)?;
                 o.set_named_property("seq", env.create_double(c.seq as f64)?)?;
                 match &c.row {
-                    Some(r) => { let tc = table_cols.entry(c.table.clone()).or_insert_with(|| sql2.db.table(&c.table).map(|t| t.schema.columns.iter().map(|col| (col.name.clone(), Some(col.ty.clone()))).collect()).unwrap_or_default()); o.set_named_property("row", row_obj(&env, tc, r)?)?; }
+                    Some(r) => { let tc = table_cols.entry(c.table.clone()).or_insert_with(|| sql2.upgrade().and_then(|q| q.db.table(&c.table)).map(|t| t.schema.columns.iter().map(|col| (col.name.clone(), Some(col.ty.clone()))).collect()).unwrap_or_default()); o.set_named_property("row", row_obj(&env, tc, r)?)?; }
                     None => o.set_named_property("row", env.get_null()?)?,
                 }
             }

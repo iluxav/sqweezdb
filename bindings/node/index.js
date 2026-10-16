@@ -171,7 +171,8 @@ class Database {
  * durable (false | true | 'cloud'), create, backup { endpoint, bucket, prefix, region, accessKey, secretKey,
  * passphrase, interval, compress, compactAfter, compactEvery, bootstrap }, follow { dir | bucket, poll },
  * snapshot { logBytes, idleAfter }, listen { socket, tcp, token }, live { debounce, queue }, log { threadsIdleAfter },
- * plus rowMode for this binding. A sqweezdb.toml in the directory is read first; options win. Never wipes a directory.
+ * configFile (a TOML file with the same keys, read first and overridden by these options), plus rowMode for this
+ * binding. Nothing is read from the data directory itself. Never wipes a directory.
  */
 function open(path, opts) {
   const { rowMode, ...engine } = opts || {};

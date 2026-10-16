@@ -23,7 +23,8 @@ static OPEN_ERR: std::sync::Mutex<Option<CString>> = std::sync::Mutex::new(None)
     unsafe { sqweezdb_open_with(path, if durable != 0 { c"{\"durable\":true}".as_ptr() } else { c"{}".as_ptr() }) }
 }
 /// Open (or create) with a JSON options document (the keys of `config.rs`: durable, create, backup, follow, snapshot,
-/// listen, live, log). `<dir>/sqweezdb.toml` is read first; the options win. Null on failure, see `sqweezdb_open_error`.
+/// listen, live, log, and configFile naming a TOML file with the same keys that the options override). Null on failure,
+/// see `sqweezdb_open_error`.
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_open_with(path: *const c_char, json: *const c_char) -> *mut Db {
     let path = std::path::PathBuf::from(unsafe { cstr(path) }); let json = unsafe { cstr(json) };
     let fail = |e: String| { *OPEN_ERR.lock().unwrap() = Some(CString::new(e.replace('\0', " ")).unwrap()); std::ptr::null_mut() };

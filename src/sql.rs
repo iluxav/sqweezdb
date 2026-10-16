@@ -86,7 +86,7 @@ pub fn error_code(msg: &str) -> &'static str {
     else if m.starts_with("foreign key violation") || m.contains(" blocked: ") { "FOREIGN_KEY" }
     else if m.starts_with("permission denied") { "DENIED" }
     else if m.starts_with("statement needs ") { "ARGUMENTS" }
-    else if m.starts_with("options:") || m.contains("sqweezdb.toml") || m.contains(" is required") || m.starts_with("no database in") || m.starts_with("durable") || m.starts_with("follow") || m.starts_with("listen.") || m.starts_with("snapshot.") || m.starts_with("live.") || m.starts_with("log.") || m.starts_with("backup.") { "CONFIG" }
+    else if m.starts_with("options:") || m.contains(".toml") || m.contains(" is required") || m.starts_with("no database in") || m.starts_with("durable") || m.starts_with("follow") || m.starts_with("listen.") || m.starts_with("snapshot.") || m.starts_with("live.") || m.starts_with("log.") || m.starts_with("backup.") { "CONFIG" }
     else if m.starts_with("already in a transaction") || m.starts_with("not in a transaction") { "TRANSACTION" }
     else if m.contains("type mismatch") || m.contains(" exceeds ") || m.contains("is NOT NULL") || (m.starts_with("expected ") && m.contains(", got ")) || m.contains(": expected ") || m.contains("not a timestamp") { "TYPE" }
     else if m.starts_with("sql parser error") || m.contains("Expected") || m.starts_with("expected ") || m.starts_with("unsupported") { "SYNTAX" }
@@ -1190,7 +1190,7 @@ enum Store { Empty, Set(KeySet), Dense { min: i64, max: i64, es: usize, data: Ve
 
 
 /// Restore the latest state of a bucket into an empty `dir` before the first open (`backup.bootstrap`). Downloads into
-/// a scratch directory so a `sqweezdb.toml` already in `dir` survives; a bucket with nothing in it leaves `dir` empty.
+/// a scratch directory and moves the files over; a bucket with nothing in it leaves `dir` empty.
 fn bootstrap_from_bucket(dir: &std::path::Path, b: &crate::config::Backup) -> Result<(), String> {
     let scratch = dir.join(".bootstrap");
     let (s0, chunks, bytes) = crate::cloud::download(&b.cloud(), &scratch)?;

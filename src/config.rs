@@ -1,6 +1,8 @@
 //! Configuration for `Sql::open_with`. One set of keys, three sources, one precedence: options passed from code
-//! (the bindings send them as JSON) win over `<dir>/sqweezdb.toml`, which wins over the defaults. Strings in the
-//! file may reference environment variables as `${NAME}`; nothing is read from the environment implicitly.
+//! (the bindings send them as JSON) win over a TOML file, which wins over the defaults. The file is read only when
+//! the application names it (`configFile`): the data directory is data, and a writable one must not be able to
+//! redirect backups, open listeners or read the environment. Strings in the file may reference environment
+//! variables as `${NAME}`; nothing is read from the environment unless the named file asks for it.
 //! Durations are `"5ms"`, `"1s"`, `"30s"`, `"2m"`, `"1h"`, `"7d"` or a number of milliseconds; sizes are
 //! `"256MB"`, `"1GB"` or a number of bytes; `0` turns a policy off.
 use serde::Deserialize;
@@ -35,17 +37,19 @@ impl Default for Config {
 }
 impl Config {
     pub fn durable(mut self, d: Durability) -> Config { self.durable = d; self }
-    /// The effective configuration for `dir`: defaults, then `<dir>/sqweezdb.toml` if present, then `json` (options from code).
-    pub fn load(dir: &Path, json: Option<&str>) -> Result<Config, String> {
+    /// The effective configuration: defaults, then the TOML file the options name as `configFile` (if any), then the
+    /// options themselves. `_dir` is the database directory; nothing is read from it.
+    pub fn load(_dir: &Path, json: Option<&str>) -> Result<Config, String> {
+        let code: ConfigFile = match json { Some(j) if !j.trim().is_empty() && j.trim() != "null" => serde_json::from_str(j).map_err(|e| format!("options: {e}"))?, _ => ConfigFile::default() };
         let mut file = ConfigFile::default();
-        let path = dir.join("sqweezdb.toml");
-        if path.exists() {
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(p) = &code.config_file {
+            let path = Path::new(p);
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let text = interpolate(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             file = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            if file.config_file.is_some() { return Err(format!("{}: configFile cannot be set from a file", path.display())); }
         }
-        if let Some(j) = json { if !j.trim().is_empty() && j.trim() != "null" { let code: ConfigFile = serde_json::from_str(j).map_err(|e| format!("options: {e}"))?; file = file.overlay(code); } }
-        file.resolve()
+        file.overlay(code).resolve()
     }
     /// Options alone (no file), as the bindings send them.
     pub fn from_json(json: &str) -> Result<Config, String> { let code: ConfigFile = serde_json::from_str(json).map_err(|e| format!("options: {e}"))?; code.resolve() }
@@ -99,6 +103,8 @@ pub struct LogPolicy { /// Log threads leave after this long without writes and 
 #[derive(Deserialize, Default, Debug, Clone)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConfigFile {
+    /// Path of a TOML file with these same keys, read before the options and overridden by them. Only from code.
+    #[serde(alias = "config_file")] pub config_file: Option<String>,
     pub durable: Option<DurableIn>, pub create: Option<bool>,
     #[serde(alias = "recover_threads")] pub recover_threads: Option<usize>,
     pub backup: Option<BackupFile>, pub follow: Option<FollowFile>, pub snapshot: Option<SnapshotFile>, pub listen: Option<ListenFile>, pub live: Option<LiveFile>, pub log: Option<LogFile>,
@@ -134,6 +140,7 @@ impl BackupFile { fn overlay(self, o: BackupFile) -> BackupFile { BackupFile { e
 impl ConfigFile {
     pub fn overlay(self, o: ConfigFile) -> ConfigFile {
         ConfigFile {
+            config_file: pick(self.config_file, o.config_file),
             durable: pick(self.durable, o.durable), create: pick(self.create, o.create), recover_threads: pick(self.recover_threads, o.recover_threads),
             backup: nest(self.backup, o.backup, |a, b| a.overlay(b)),
             follow: nest(self.follow, o.follow, |a, b| FollowFile { dir: pick(a.dir, b.dir), bucket: nest(a.bucket, b.bucket, |x, y| x.overlay(y)), poll: pick(a.poll, b.poll) }),
@@ -243,13 +250,20 @@ mod tests {
     #[test] fn file_then_code_then_env() {
         let dir = std::env::temp_dir().join(format!("sqweezdb-config-test-{}", std::process::id())); std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("SQWEEZDB_TEST_SECRET", "s3cr3t"); }
-        std::fs::write(dir.join("sqweezdb.toml"), "durable = true\n[backup]\nendpoint = \"http://127.0.0.1:9000\"\nbucket = \"from-file\"\naccessKey = \"k\"\nsecretKey = \"${SQWEEZDB_TEST_SECRET}\"\n[snapshot]\nlogBytes = \"64MB\"\n").unwrap();
-        let c = Config::load(&dir, Some(r#"{"backup":{"bucket":"from-code"},"snapshot":{"idleAfter":"10s"}}"#)).unwrap();
+        let file = dir.join("orders.toml");
+        std::fs::write(&file, "durable = true\n[backup]\nendpoint = \"http://127.0.0.1:9000\"\nbucket = \"from-file\"\naccessKey = \"k\"\nsecretKey = \"${SQWEEZDB_TEST_SECRET}\"\n[snapshot]\nlogBytes = \"64MB\"\n").unwrap();
+        let json = format!(r#"{{"configFile":{:?},"backup":{{"bucket":"from-code"}},"snapshot":{{"idleAfter":"10s"}}}}"#, file.to_str().unwrap());
+        let c = Config::load(&dir, Some(&json)).unwrap();
         assert_eq!(c.durable, Durability::Fsync, "from the file");
         let b = c.backup.unwrap(); assert_eq!(b.bucket, "from-code", "code wins over the file"); assert_eq!(b.secret_key, "s3cr3t", "secret from the environment"); assert_eq!(b.endpoint, "http://127.0.0.1:9000", "untouched file values survive the overlay");
         assert_eq!(c.snapshot.log_bytes, Some(64 << 20)); assert_eq!(c.snapshot.idle_after, Some(Duration::from_secs(10)));
-        std::fs::write(dir.join("sqweezdb.toml"), "[backup]\nsecretKey = \"${SQWEEZDB_TEST_UNSET_VAR}\"\n").unwrap();
-        assert!(Config::load(&dir, None).unwrap_err().contains("SQWEEZDB_TEST_UNSET_VAR"));
+        // a file inside the data directory is data, not configuration: it is never read unless named
+        std::fs::write(dir.join("sqweezdb.toml"), "durable = true\n[listen]\ntcp = \"0.0.0.0:1\"\ntoken = \"x\"\n").unwrap();
+        let c = Config::load(&dir, Some("{}")).unwrap(); assert_eq!(c.durable, Durability::Visible); assert!(c.listen.tcp.is_none());
+        std::fs::write(&file, "configFile = \"other.toml\"\n").unwrap();
+        assert!(Config::load(&dir, Some(&format!(r#"{{"configFile":{:?}}}"#, file.to_str().unwrap()))).unwrap_err().contains("cannot be set from a file"));
+        std::fs::write(&file, "[backup]\nsecretKey = \"${SQWEEZDB_TEST_UNSET_VAR}\"\n").unwrap();
+        assert!(Config::load(&dir, Some(&format!(r#"{{"configFile":{:?}}}"#, file.to_str().unwrap()))).unwrap_err().contains("SQWEEZDB_TEST_UNSET_VAR"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

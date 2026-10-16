@@ -83,6 +83,8 @@ export interface BackupOptions {
   bootstrap?: boolean;
 }
 export interface OpenOptions {
+  /** A TOML file with these same keys, read first and overridden by the options here. Only the application chooses it; nothing is read from the data directory. */
+  configFile?: string;
   /** false (default): writes return when visible, `durable` promises cover the fsync. true: every commit waits for its fsync. 'cloud': every commit waits for the bucket. */
   durable?: boolean | 'cloud';
   /** Create the directory when it holds no database (default true). An existing database is never wiped. */
@@ -99,5 +101,5 @@ export interface OpenOptions {
   /** How rows become objects (this binding only). */
   rowMode?: 'auto' | 'native' | 'packed';
 }
-/** Open or create the database directory. A `sqweezdb.toml` in it is read first; these options win. */
+/** Open or create the database directory with these options (and the file `configFile` names, if any). */
 export function open(path: string, opts?: OpenOptions): Database;

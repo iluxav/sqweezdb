@@ -42,7 +42,7 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
 }
 #[pymethods] impl PyDb {
     /// Database(path, durable=False, **options): options are the engine's configuration keys (backup=..., snapshot=...,
-    /// listen=..., follow=..., live=..., log=..., create=...); a sqweezdb.toml in the directory is read first, options win.
+    /// listen=..., follow=..., live=..., log=..., create=..., config_file=path of a TOML file read first and overridden by the options).
     #[new] #[pyo3(signature = (path, durable = false, **options))]
     fn new(py: Python<'_>, path: &str, durable: bool, options: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Self> {
         let p = std::path::PathBuf::from(path);

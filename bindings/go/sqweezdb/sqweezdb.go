@@ -33,14 +33,15 @@ type Session struct {
 // Options mirror the engine's configuration keys (see src/config.rs). Durations are strings like "500ms", "1s", "2m";
 // sizes like "256MB". Zero values are omitted, so an empty Options means the defaults.
 type Options struct {
-	Durable  any       `json:"durable,omitempty"` // false, true, or "cloud"
-	Create   *bool     `json:"create,omitempty"`
-	Backup   *Backup   `json:"backup,omitempty"`
-	Follow   *Follow   `json:"follow,omitempty"`
-	Snapshot *Snapshot `json:"snapshot,omitempty"`
-	Listen   *Listen   `json:"listen,omitempty"`
-	Live     *Live     `json:"live,omitempty"`
-	Log      *Log      `json:"log,omitempty"`
+	ConfigFile string    `json:"configFile,omitempty"` // a TOML file with these keys, read first and overridden by the options
+	Durable    any       `json:"durable,omitempty"`    // false, true, or "cloud"
+	Create     *bool     `json:"create,omitempty"`
+	Backup     *Backup   `json:"backup,omitempty"`
+	Follow     *Follow   `json:"follow,omitempty"`
+	Snapshot   *Snapshot `json:"snapshot,omitempty"`
+	Listen     *Listen   `json:"listen,omitempty"`
+	Live       *Live     `json:"live,omitempty"`
+	Log        *Log      `json:"log,omitempty"`
 }
 type Backup struct {
 	Endpoint     string `json:"endpoint,omitempty"`
@@ -81,8 +82,8 @@ type Log struct {
 // Open opens or creates the database directory; durable waits for the disk on every commit.
 func Open(path string, durable bool) (*DB, error) { return OpenWith(path, Options{Durable: durable}) }
 
-// OpenWith opens or creates the database directory with the given options. A sqweezdb.toml in the directory is read
-// first; the options win. An existing directory is never wiped.
+// OpenWith opens or creates the database directory with the given options. If ConfigFile names a TOML file it is read
+// first and the options win. Nothing is read from the data directory itself. An existing directory is never wiped.
 func OpenWith(path string, opts Options) (*DB, error) {
 	js, err := json.Marshal(opts)
 	if err != nil {
