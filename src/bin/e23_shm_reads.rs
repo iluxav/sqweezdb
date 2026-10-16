@@ -1,8 +1,8 @@
 //! Experiment 23 (H34): second-process reads over a shared-memory ring instead of a socket.
-use dblab::net::{Client, Server};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::net::{Client, Server};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;

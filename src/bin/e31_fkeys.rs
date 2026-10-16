@@ -1,9 +1,9 @@
 //! Experiment 31: foreign keys enforced by default. 1M users; orders (ON DELETE CASCADE), invoices (RESTRICT), payments
 //! (SET NULL). SQLite runs twice: its default (REFERENCES parsed, not enforced) and with PRAGMA foreign_keys=ON plus the
 //! child indexes its documentation tells you to create. Ours enforces always and indexes the key columns itself.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

@@ -1,8 +1,8 @@
 //! Experiment 21: a second program reaching the database. Ours: owner process + Unix socket; SQLite: two processes on one file.
-use dblab::net::{Client, Server};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::net::{Client, Server};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

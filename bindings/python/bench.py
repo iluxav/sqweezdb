@@ -1,12 +1,12 @@
 # Bench: the same workloads through our Python extension and through the standard sqlite3 module.
 import os, shutil, sqlite3, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pydblab
+import sqweezdb
 N = 1_000_000
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../data/nocow")
 print("=== Python bindings: ours (PyO3 extension) vs the sqlite3 module (C); 1M rows ===")
 d = os.path.join(ROOT, "pybench"); shutil.rmtree(d, ignore_errors=True)
-db = pydblab.Database(d); s = db.session()
+db = sqweezdb.Database(d); s = db.session()
 s.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, name VARCHAR(32))")
 ins = db.prepare("INSERT INTO t VALUES (?,?,?,?)")
 t = time.perf_counter()

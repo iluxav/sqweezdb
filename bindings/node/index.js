@@ -1,16 +1,16 @@
 'use strict';
-// dblab for Node: the API developers see. Synchronous like better-sqlite3 and node:sqlite, because a read answers in
+// sqweezdb for Node: the API developers see. Synchronous like better-sqlite3 and node:sqlite, because a read answers in
 // well under a microsecond; promises only where there is real waiting (durability, subscriptions, long scans).
-const native = require('./dblab.node');
+const native = require('./sqweezdb.node');
 
-class DblabError extends Error {
-  constructor(code, message) { super(message); this.name = 'DblabError'; this.code = code; }
+class SqweezError extends Error {
+  constructor(code, message) { super(message); this.name = 'SqweezError'; this.code = code; }
 }
 function wrap(e) {
-  if (e instanceof DblabError) return e;
+  if (e instanceof SqweezError) return e;
   const m = /^([A-Z_]+)\|([\s\S]*)$/.exec((e && e.message) || '');
   if (!m) return e;
-  const err = new DblabError(m[1], m[2]); if (e.stack) err.stack = err.stack.split('\n')[0] + '\n' + e.stack.split('\n').slice(1).join('\n'); return err;
+  const err = new SqweezError(m[1], m[2]); if (e.stack) err.stack = err.stack.split('\n')[0] + '\n' + e.stack.split('\n').slice(1).join('\n'); return err;
 }
 const norm = (p) => (p === undefined ? [] : Array.isArray(p) ? p : [p]);
 // a short randomized pause between transaction retries (microseconds), without yielding to the event loop
@@ -174,4 +174,4 @@ function open(path, opts) {
   return new Database(handle, sess, { path, durable, rowMode: opts && opts.rowMode });
 }
 
-module.exports = { open, Database, Statement, Subscription, RunResult, DblabError };
+module.exports = { open, Database, Statement, Subscription, RunResult, SqweezError };

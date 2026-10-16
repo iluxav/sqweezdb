@@ -1,15 +1,15 @@
 [package]
-name = "pydblab"
+name = "sqweezdb-python"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "pydblab"
+name = "sqweezdb_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-dblab = { path = "../.." }
+sqweezdb = { path = "../.." }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 
 [profile.release]
-debug = 1
+strip = true

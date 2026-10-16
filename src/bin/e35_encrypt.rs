@@ -1,8 +1,8 @@
 //! Experiment 35: client-side encryption of everything that goes to the bucket (AES-256-GCM after zstd, key from a
 //! passphrase the user holds), multipart snapshot upload, and what a wrong key or a tampered object does on restore.
-use dblab::cloud::{clear_prefix, download, pack_bytes, start_puller, start_uploader, unpack_bytes, CloudConfig};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
+use sqweezdb::cloud::{clear_prefix, download, pack_bytes, start_puller, start_uploader, unpack_bytes, CloudConfig};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,18 +13,18 @@ const N: i64 = 1_000_000;
 const DIR: &str = "data/nocow/e35dir"; const STORE: &str = "data/nocow/s3store";
 fn count(sql: &Sql) -> i64 { let mut s = Session::default(); match sql.exec_s(&mut s, "SELECT count(*) FROM t", &[]).unwrap()[0][0] { Value::Int(i) => i, _ => -1 } }
 fn mb(b: usize) -> f64 { b as f64 / 1e6 }
-fn objects(sub: &str) -> Vec<PathBuf> { let mut out = vec![]; fn walk(p: &std::path::Path, out: &mut Vec<PathBuf>) { if let Ok(rd) = fs::read_dir(p) { for e in rd.flatten() { if e.metadata().unwrap().is_dir() { walk(&e.path(), out); } else { out.push(e.path()); } } } } walk(&PathBuf::from(format!("{STORE}/dblab/{sub}")), &mut out); out.sort(); out }
+fn objects(sub: &str) -> Vec<PathBuf> { let mut out = vec![]; fn walk(p: &std::path::Path, out: &mut Vec<PathBuf>) { if let Ok(rd) = fs::read_dir(p) { for e in rd.flatten() { if e.metadata().unwrap().is_dir() { walk(&e.path(), out); } else { out.push(e.path()); } } } } walk(&PathBuf::from(format!("{STORE}/sqweezdb/{sub}")), &mut out); out.sort(); out }
 fn build(dir: &PathBuf) -> Sql { let sql = Sql::create(dir, false); let mut s = Session::default(); sql.exec_s(&mut s, "CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, ts INT)", &[]).unwrap(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?)").unwrap(); for id in 1..=N { if id % 1000 == 1 { sql.exec_s(&mut s, "BEGIN", &[]).unwrap(); } sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Float((id % 1000) as f64), Value::Int(id % 20), Value::Int(id * 7919 % 1_000_003)]).unwrap(); if id % 1000 == 0 { sql.exec_s(&mut s, "COMMIT", &[]).unwrap(); } } sql }
 
 fn main() {
     println!("=== E35: encryption before upload (AES-256-GCM after zstd; 1M rows; local rclone S3 server) ===");
-    clear_prefix(&CloudConfig::local("dblab", "")); std::thread::sleep(Duration::from_secs(2));
+    clear_prefix(&CloudConfig::local("sqweezdb", "")); std::thread::sleep(Duration::from_secs(2));
     let dir = PathBuf::from(format!("{DIR}/primary")); let sql = Arc::new(build(&dir)); let st = sql.snapshot();
     // ---- A. CPU cost ----
-    let snap = fs::read(dir.join("snap")).unwrap(); let mut plain = CloudConfig::local("dblab", "x"); plain.compress = false; let zonly = CloudConfig::local("dblab", "x"); let eonly = { let mut c = plain.clone(); c = c.with_passphrase("correct horse battery staple"); c }; let both = CloudConfig::local("dblab", "x").with_passphrase("correct horse battery staple");
+    let snap = fs::read(dir.join("snap")).unwrap(); let mut plain = CloudConfig::local("sqweezdb", "x"); plain.compress = false; let zonly = CloudConfig::local("sqweezdb", "x"); let eonly = { let mut c = plain.clone(); c = c.with_passphrase("correct horse battery staple"); c }; let both = CloudConfig::local("sqweezdb", "x").with_passphrase("correct horse battery staple");
     for (label, cfg) in [("zstd only", &zonly), ("AES-256-GCM only", &eonly), ("zstd then AES-256-GCM", &both)] { let t = Instant::now(); let out = pack_bytes(&snap, cfg); let el = t.elapsed(); let t2 = Instant::now(); let back = unpack_bytes(&out, cfg).unwrap(); let el2 = t2.elapsed(); println!("A. snapshot {:.1} MB, {label}: {:.1} MB in {:.0} ms ({:.0} MB/s), back in {:.0} ms ({:.0} MB/s), round trip {}", mb(snap.len()), mb(out.len()), el.as_secs_f64() * 1e3, mb(snap.len()) / el.as_secs_f64(), el2.as_secs_f64() * 1e3, mb(snap.len()) / el2.as_secs_f64(), if back == snap { "exact" } else { "MISMATCH" }); }
     // ---- B. upload encrypted; what the bucket sees ----
-    let mut cfg = CloudConfig::local("dblab", "primary").with_passphrase("correct horse battery staple"); cfg.compact_after = Duration::from_secs(5); cfg.compact_every = Duration::from_secs(2);
+    let mut cfg = CloudConfig::local("sqweezdb", "primary").with_passphrase("correct horse battery staple"); cfg.compact_after = Duration::from_secs(5); cfg.compact_every = Duration::from_secs(2);
     let t = Instant::now(); let up = start_uploader(cfg.clone(), dir.clone(), sql.db.log.clone()); while up.stats.snapshots.load(Ordering::Relaxed) == 0 { std::thread::sleep(Duration::from_millis(20)); }
     let objs = objects("primary/snap"); let raw = fs::read(&objs[0]).unwrap(); let again = zstd::encode_all(&raw[..], 3).unwrap();
     println!("B. snapshot uploaded encrypted in {:.2} s: {:.1} MB in {} multipart parts; key {}; the object starts {} and compresses to {:.3}x of its size (random-looking)", t.elapsed().as_secs_f64(), mb(raw.len()), up.stats.parts.load(Ordering::Relaxed), objs[0].file_name().unwrap().to_string_lossy(), raw[..12].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "), again.len() as f64 / raw.len() as f64);
@@ -37,8 +37,8 @@ fn main() {
     println!("B. cloud-durable commits with compression + encryption, 256 writers: {:.0} commits/s, latency p50 {:.1} ms (E33 without either: 41,392/s at 5.0 ms)", done.load(Ordering::Relaxed) as f64 / 3.0, l[l.len() / 2]);
     // ---- C. restore: right key, wrong key, tampered object ----
     let rdir = PathBuf::from(format!("{DIR}/restored")); let t = Instant::now(); let (_, chunks, bytes) = download(&cfg, &rdir).unwrap(); let (r, _) = Sql::open(&rdir, false, 12).unwrap(); println!("C. restore with the right key: {chunks} objects, {:.1} MB, {:.2} s -> {} rows vs primary {} ({})", mb(bytes as usize), t.elapsed().as_secs_f64(), count(&r), count(&sql), if count(&r) == count(&sql) { "EXACT" } else { "MISMATCH" }); drop(r);
-    let wrong = CloudConfig::local("dblab", "primary").with_passphrase("incorrect horse"); println!("C. restore with a wrong passphrase: {}", match download(&wrong, &rdir) { Ok(_) => "ACCEPTED (bad)".into(), Err(e) => format!("refused: {}", e.chars().take(120).collect::<String>()) });
-    let nokey = CloudConfig::local("dblab", "primary"); println!("C. restore with no key: {}", match download(&nokey, &rdir) { Ok(_) => "ACCEPTED (bad)".into(), Err(e) => format!("refused: {}", e.chars().take(120).collect::<String>()) });
+    let wrong = CloudConfig::local("sqweezdb", "primary").with_passphrase("incorrect horse"); println!("C. restore with a wrong passphrase: {}", match download(&wrong, &rdir) { Ok(_) => "ACCEPTED (bad)".into(), Err(e) => format!("refused: {}", e.chars().take(120).collect::<String>()) });
+    let nokey = CloudConfig::local("sqweezdb", "primary"); println!("C. restore with no key: {}", match download(&nokey, &rdir) { Ok(_) => "ACCEPTED (bad)".into(), Err(e) => format!("refused: {}", e.chars().take(120).collect::<String>()) });
     // tamper: flip one byte in the middle of the newest log chunk in the bucket's backing store
     std::thread::sleep(Duration::from_millis(1500)); let logs = objects("primary/log"); let victim = logs.last().unwrap().clone(); let mut bytes_v = fs::read(&victim).unwrap(); let mid = bytes_v.len() / 2; bytes_v[mid] ^= 0x01; fs::write(&victim, &bytes_v).unwrap(); std::thread::sleep(Duration::from_millis(1500));
     println!("C. one bit flipped inside {} in the bucket: restore {}", victim.file_name().unwrap().to_string_lossy(), match download(&cfg, &rdir) { Ok(_) => "ACCEPTED (bad)".into(), Err(e) => format!("refused: {}", e.chars().take(140).collect::<String>()) });

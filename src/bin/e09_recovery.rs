@@ -1,7 +1,7 @@
 //! Experiment 09: crash recovery round. kill -9 a writing process, recover, verify every acknowledged commit survived.
 //! Both engines get the same treatment. Also: restart time after a crash with a large log / large WAL.
-use dblab::engine::*;
-use dblab::util::Rng;
+use sqweezdb::engine::*;
+use sqweezdb::util::Rng;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};

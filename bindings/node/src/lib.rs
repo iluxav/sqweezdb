@@ -1,10 +1,10 @@
-//! Node addon over the dblab engine (napi-rs): the native half. `index.js` is the API developers see.
+//! Node addon over the sqweezdb engine (napi-rs): the native half. `index.js` is the API developers see.
 //! Rows cross into JavaScript as objects built here from the plan's column names and types:
 //! INT -> number (BigInt past 2^53), DOUBLE -> number, BOOL -> boolean, TEXT -> string, BYTES -> Buffer,
 //! TIMESTAMP -> Date, NULL -> null. Errors carry a code: the message is "CODE|text" and index.js splits it.
-use dblab::live::Event;
-use dblab::sql::{self, ChangeOp, Prepared, Session, Sql};
-use dblab::table::{ColType, Value};
+use sqweezdb::live::Event;
+use sqweezdb::sql::{self, ChangeOp, Prepared, Session, Sql};
+use sqweezdb::table::{ColType, Value};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsBigInt, JsBoolean, JsBuffer, JsDate, JsFunction, JsNumber, JsObject, JsString, JsUnknown, ValueType};
@@ -93,7 +93,7 @@ pub fn open(path: String, durable: Option<bool>) -> Result<Db> {
     let d = durable.unwrap_or(false);
     let mut g = OPEN.lock().unwrap(); let reg = g.get_or_insert_with(HashMap::new);
     if let Some(sql) = reg.get(&p).and_then(|w| w.upgrade()) { return Ok(Db { sql: Mutex::new(Some(sql)), durable: d }); }
-    let existing = p.join("snap").exists() || !dblab::table::GLog::list_segments(&p).is_empty();
+    let existing = p.join("snap").exists() || !sqweezdb::table::GLog::list_segments(&p).is_empty();
     let sql = if existing { Sql::open(&p, d, 4).map_err(err)?.0 } else { Sql::create(&p, d) };
     let sql = Arc::new(sql); reg.insert(p, Arc::downgrade(&sql));
     Ok(Db { sql: Mutex::new(Some(sql)), durable: d })
@@ -164,7 +164,7 @@ pub fn open(path: String, durable: Option<bool>) -> Result<Db> {
         start_push(self.sql.clone(), sub, Arc::new(cols), rows, callback)
     }
 }
-fn start_push(sql: Arc<Sql>, sub: dblab::live::Subscription, cols: Arc<Cols>, initial: Vec<Vec<Value>>, callback: JsFunction) -> Result<Sub> {
+fn start_push(sql: Arc<Sql>, sub: sqweezdb::live::Subscription, cols: Arc<Cols>, initial: Vec<Vec<Value>>, callback: JsFunction) -> Result<Sub> {
     let (sql2, cols2) = (sql.clone(), cols.clone()); let mut table_cols: HashMap<String, Cols> = HashMap::new();
     let tsfn: ThreadsafeFunction<Payload, ErrorStrategy::Fatal> = callback.create_threadsafe_function(0, move |ctx: ThreadSafeCallContext<Payload>| {
         let env = ctx.env; let mut o = env.create_object()?;

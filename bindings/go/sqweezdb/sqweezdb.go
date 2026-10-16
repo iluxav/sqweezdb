@@ -1,19 +1,19 @@
-// Package dblab is a thin Go binding over the C ABI of the dblab engine (one process owns a database directory).
-package dblab
+// Package sqweezdb is a thin Go binding over the C ABI of the sqweezdb engine (one process owns a database directory).
+package sqweezdb
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../../../target/release -ldblab -Wl,-rpath,${SRCDIR}/../../../target/release
+#cgo LDFLAGS: -L${SRCDIR}/../../../target/release -lsqweezdb -Wl,-rpath,${SRCDIR}/../../../target/release
 #include <stdlib.h>
 #include <stddef.h>
 typedef struct Db Db; typedef struct Stmt Stmt; typedef struct Sess Sess; typedef struct Rows Rows;
 typedef struct { int tag; long long i; double f; const unsigned char* ptr; size_t len; } CValue;
-Db* dblab_open(const char* path, int durable); void dblab_close(Db*); const char* dblab_last_error(Db*);
-Sess* dblab_session(Db*); void dblab_session_free(Sess*); int dblab_login(Db*, Sess*, const char*);
-Stmt* dblab_prepare(Db*, const char*); void dblab_finalize(Stmt*);
-Rows* dblab_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* dblab_exec_text(Db*, Sess*, const char*, const CValue*, int);
-int dblab_rows_count(Rows*); int dblab_rows_cols(Rows*); int dblab_rows_get(Rows*, int, int, CValue*); int dblab_rows_all(Rows*, CValue*, int); void dblab_rows_free(Rows*);
-long long dblab_snapshot(Db*);
-typedef struct Sub Sub; Sub* dblab_subscribe(Db*, Sess*, const char*, const CValue*, int); int dblab_sub_next(Sub*, int, Rows**); void dblab_sub_free(Sub*);
+Db* sqweezdb_open(const char* path, int durable); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
+Sess* sqweezdb_session(Db*); void sqweezdb_session_free(Sess*); int sqweezdb_login(Db*, Sess*, const char*);
+Stmt* sqweezdb_prepare(Db*, const char*); void sqweezdb_finalize(Stmt*);
+Rows* sqweezdb_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* sqweezdb_exec_text(Db*, Sess*, const char*, const CValue*, int);
+int sqweezdb_rows_count(Rows*); int sqweezdb_rows_cols(Rows*); int sqweezdb_rows_get(Rows*, int, int, CValue*); int sqweezdb_rows_all(Rows*, CValue*, int); void sqweezdb_rows_free(Rows*);
+long long sqweezdb_snapshot(Db*);
+typedef struct Sub Sub; Sub* sqweezdb_subscribe(Db*, Sess*, const char*, const CValue*, int); int sqweezdb_sub_next(Sub*, int, Rows**); void sqweezdb_sub_free(Sub*);
 */
 import "C"
 import (
@@ -36,31 +36,31 @@ func Open(path string, durable bool) (*DB, error) {
 	if durable {
 		d = 1
 	}
-	p := C.dblab_open(cp, C.int(d))
+	p := C.sqweezdb_open(cp, C.int(d))
 	if p == nil {
-		return nil, errors.New("dblab: open failed")
+		return nil, errors.New("sqweezdb: open failed")
 	}
 	return &DB{p: p}, nil
 }
-func (db *DB) Close()            { C.dblab_close(db.p) }
-func (db *DB) Snapshot() int64   { return int64(C.dblab_snapshot(db.p)) }
-func (db *DB) lastError() error  { return errors.New(C.GoString(C.dblab_last_error(db.p))) }
-func (db *DB) Session() *Session { return &Session{db: db, p: C.dblab_session(db.p)} }
-func (s *Session) Close()        { C.dblab_session_free(s.p) }
+func (db *DB) Close()            { C.sqweezdb_close(db.p) }
+func (db *DB) Snapshot() int64   { return int64(C.sqweezdb_snapshot(db.p)) }
+func (db *DB) lastError() error  { return errors.New(C.GoString(C.sqweezdb_last_error(db.p))) }
+func (db *DB) Session() *Session { return &Session{db: db, p: C.sqweezdb_session(db.p)} }
+func (s *Session) Close()        { C.sqweezdb_session_free(s.p) }
 func (db *DB) Prepare(sql string) (*Stmt, error) {
 	cs := C.CString(sql)
 	defer C.free(unsafe.Pointer(cs))
-	p := C.dblab_prepare(db.p, cs)
+	p := C.sqweezdb_prepare(db.p, cs)
 	if p == nil {
 		return nil, db.lastError()
 	}
 	return &Stmt{p: p}, nil
 }
-func (st *Stmt) Close() { C.dblab_finalize(st.p) }
+func (st *Stmt) Close() { C.sqweezdb_finalize(st.p) }
 func (s *Session) Login(user string) error {
 	cu := C.CString(user)
 	defer C.free(unsafe.Pointer(cu))
-	if C.dblab_login(s.db.p, s.p, cu) != 0 {
+	if C.sqweezdb_login(s.db.p, s.p, cu) != 0 {
 		return s.db.lastError()
 	}
 	return nil
@@ -102,14 +102,14 @@ func args(a []any, pin *runtime.Pinner) ([]C.CValue, []any) {
 	return vals, a
 }
 func collect(r *C.Rows) [][]any {
-	n, m := int(C.dblab_rows_count(r)), int(C.dblab_rows_cols(r))
+	n, m := int(C.sqweezdb_rows_count(r)), int(C.sqweezdb_rows_cols(r))
 	out := make([][]any, n)
 	if n == 0 || m == 0 {
-		C.dblab_rows_free(r)
+		C.sqweezdb_rows_free(r)
 		return out
 	}
 	flat := make([]C.CValue, n*m)
-	C.dblab_rows_all(r, &flat[0], C.int(len(flat)))
+	C.sqweezdb_rows_all(r, &flat[0], C.int(len(flat)))
 	for i := 0; i < n; i++ {
 		row := make([]any, m)
 		for j := 0; j < m; j++ {
@@ -129,7 +129,7 @@ func collect(r *C.Rows) [][]any {
 		}
 		out[i] = row
 	}
-	C.dblab_rows_free(r)
+	C.sqweezdb_rows_free(r)
 	return out
 }
 
@@ -143,7 +143,7 @@ func (s *Session) Exec(st *Stmt, a ...any) ([][]any, error) {
 		pin.Pin(&vals[0])
 		vp = &vals[0]
 	}
-	r := C.dblab_exec(s.db.p, s.p, st.p, vp, C.int(len(vals)))
+	r := C.sqweezdb_exec(s.db.p, s.p, st.p, vp, C.int(len(vals)))
 	runtime.KeepAlive(keep)
 	if r == nil {
 		return nil, s.db.lastError()
@@ -163,7 +163,7 @@ func (s *Session) ExecText(sql string, a ...any) ([][]any, error) {
 		pin.Pin(&vals[0])
 		vp = &vals[0]
 	}
-	r := C.dblab_exec_text(s.db.p, s.p, cs, vp, C.int(len(vals)))
+	r := C.sqweezdb_exec_text(s.db.p, s.p, cs, vp, C.int(len(vals)))
 	runtime.KeepAlive(keep)
 	if r == nil {
 		return nil, s.db.lastError()
@@ -188,7 +188,7 @@ func (s *Session) Subscribe(sql string, a ...any) (*Subscription, error) {
 		pin.Pin(&vals[0])
 		vp = &vals[0]
 	}
-	p := C.dblab_subscribe(s.db.p, s.p, cs, vp, C.int(len(vals)))
+	p := C.sqweezdb_subscribe(s.db.p, s.p, cs, vp, C.int(len(vals)))
 	runtime.KeepAlive(keep)
 	if p == nil {
 		return nil, s.db.lastError()
@@ -199,14 +199,14 @@ func (s *Session) Subscribe(sql string, a ...any) (*Subscription, error) {
 // Next blocks up to timeout for an event; it returns (nil, nil) on timeout and an error when the subscription was dropped.
 func (sub *Subscription) Next(timeoutMs int) ([]any, error) {
 	var r *C.Rows
-	switch C.dblab_sub_next(sub.p, C.int(timeoutMs), &r) {
+	switch C.sqweezdb_sub_next(sub.p, C.int(timeoutMs), &r) {
 	case 0:
 		rows := collect(r)
 		return rows[0], nil
 	case 1:
 		return nil, nil
 	default:
-		return nil, errors.New("dblab: subscription fell behind and was dropped; resubscribe")
+		return nil, errors.New("sqweezdb: subscription fell behind and was dropped; resubscribe")
 	}
 }
-func (sub *Subscription) Close() { C.dblab_sub_free(sub.p) }
+func (sub *Subscription) Close() { C.sqweezdb_sub_free(sub.p) }

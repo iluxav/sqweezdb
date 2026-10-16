@@ -164,7 +164,7 @@ fn concurrent_writers(dir: &Path, label: &str, threads: usize, per_thread: usize
 }
 
 fn main() {
-    let root = PathBuf::from(std::env::var("DBLAB_DATA").unwrap_or_else(|_| "data".into()));
+    let root = PathBuf::from(std::env::var("SQWEEZDB_DATA").unwrap_or_else(|_| "data".into()));
     println!("=== E00 baseline ===");
     for (label, sub) in [("cow", "cow"), ("nocow", "nocow")] {
         let dir = root.join(sub);

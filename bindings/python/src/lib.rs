@@ -1,7 +1,7 @@
-//! Python extension over the dblab engine (PyO3). The interpreter lock is released while a statement runs, so Python
+//! Python extension over the sqweezdb engine (PyO3). The interpreter lock is released while a statement runs, so Python
 //! threads get the engine's parallel reads.
-use dblab::sql::{Prepared, Session, Sql};
-use dblab::table::Value;
+use sqweezdb::sql::{Prepared, Session, Sql};
+use sqweezdb::table::Value;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use std::sync::{Arc, Mutex};
@@ -9,15 +9,15 @@ use std::sync::{Arc, Mutex};
 #[pyclass(name = "Database")] struct PyDb { sql: Arc<Sql> }
 #[pyclass(name = "Statement")] struct PyStmt { p: Arc<Prepared> }
 #[pyclass(name = "Session")] struct PySess { sql: Arc<Sql>, s: Mutex<Session> }
-#[pyclass(name = "Subscription")] struct PySub { s: dblab::live::Subscription }
+#[pyclass(name = "Subscription")] struct PySub { s: sqweezdb::live::Subscription }
 #[pymethods] impl PySub {
     /// Wait up to timeout_ms for the next change: (op, table, key, columns...) with op 1 insert, 2 update, 3 delete; None on timeout.
     #[pyo3(signature = (timeout_ms = 1000))]
     fn next<'py>(&self, py: Python<'py>, timeout_ms: u64) -> PyResult<Option<Bound<'py, PyTuple>>> {
         let ev = py.detach(|| self.s.recv_timeout(std::time::Duration::from_millis(timeout_ms)));
         match ev {
-            Some(dblab::live::Event::Change(c)) => { let mut cells: Vec<Bound<'py, PyAny>> = vec![to_py(py, &Value::Int(match c.op { dblab::sql::ChangeOp::Insert => 1, dblab::sql::ChangeOp::Update => 2, dblab::sql::ChangeOp::Delete => 3 }))?, to_py(py, &Value::Text(c.table.clone()))?, to_py(py, &Value::Int(c.pk))?]; if let Some(r) = &c.row { for v in r { cells.push(to_py(py, v)?); } } Ok(Some(PyTuple::new(py, cells)?)) }
-            Some(dblab::live::Event::Overflow { .. }) => Err(pyo3::exceptions::PyRuntimeError::new_err("subscription fell behind and was dropped; resubscribe")),
+            Some(sqweezdb::live::Event::Change(c)) => { let mut cells: Vec<Bound<'py, PyAny>> = vec![to_py(py, &Value::Int(match c.op { sqweezdb::sql::ChangeOp::Insert => 1, sqweezdb::sql::ChangeOp::Update => 2, sqweezdb::sql::ChangeOp::Delete => 3 }))?, to_py(py, &Value::Text(c.table.clone()))?, to_py(py, &Value::Int(c.pk))?]; if let Some(r) = &c.row { for v in r { cells.push(to_py(py, v)?); } } Ok(Some(PyTuple::new(py, cells)?)) }
+            Some(sqweezdb::live::Event::Overflow { .. }) => Err(pyo3::exceptions::PyRuntimeError::new_err("subscription fell behind and was dropped; resubscribe")),
             _ => Ok(None),
         }
     }
@@ -44,7 +44,7 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
     #[new] #[pyo3(signature = (path, durable = false))]
     fn new(path: &str, durable: bool) -> PyResult<Self> {
         let p = std::path::PathBuf::from(path);
-        let sql = if p.join("snap").exists() || !dblab::table::GLog::list_segments(&p).is_empty() { Sql::open(&p, durable, 4).map_err(pyo3::exceptions::PyRuntimeError::new_err)?.0 } else { Sql::create(&p, durable) };
+        let sql = if p.join("snap").exists() || !sqweezdb::table::GLog::list_segments(&p).is_empty() { Sql::open(&p, durable, 4).map_err(pyo3::exceptions::PyRuntimeError::new_err)?.0 } else { Sql::create(&p, durable) };
         Ok(PyDb { sql: Arc::new(sql) })
     }
     fn prepare(&self, sql: &str) -> PyResult<PyStmt> { Ok(PyStmt { p: self.sql.prepare(sql).map_err(pyo3::exceptions::PyValueError::new_err)? }) }
@@ -79,4 +79,4 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
         rows_to_py(py, r.map_err(pyo3::exceptions::PyRuntimeError::new_err)?)
     }
 }
-#[pymodule] fn pydblab(m: &Bound<'_, PyModule>) -> PyResult<()> { m.add_class::<PyDb>()?; m.add_class::<PyStmt>()?; m.add_class::<PySess>()?; m.add_class::<PySub>()?; Ok(()) }
+#[pymodule(name = "sqweezdb")] fn sqweezdb_module(m: &Bound<'_, PyModule>) -> PyResult<()> { m.add_class::<PyDb>()?; m.add_class::<PyStmt>()?; m.add_class::<PySess>()?; m.add_class::<PySub>()?; Ok(()) }

@@ -1,1 +1,1 @@
-fn main() { println!("dblab: run experiments with `cargo run --release --bin <name>`"); }
+fn main() { println!("sqweezdb: run experiments with `cargo run --release --bin <name>`"); }

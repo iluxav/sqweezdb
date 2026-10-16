@@ -1,7 +1,7 @@
 //! Experiment 24 (H33): correlated subqueries, same SQL both sides. 1M users, 5M orders, index on orders(user_id).
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

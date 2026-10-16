@@ -1,7 +1,7 @@
 //! Experiment 19a: NULL and DELETE semantics, statement by statement against SQLite; deletes in transactions; recovery after deletes.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

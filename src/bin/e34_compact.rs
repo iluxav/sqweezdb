@@ -1,8 +1,8 @@
 //! Experiment 34: compression of every object and compaction of small chunks in the bucket (H45/H46), with a bucket-fed
 //! follower running through the compaction; Litestream's bucket for the same data on the SQLite side.
-use dblab::cloud::{clear_prefix, download, start_puller, start_uploader, CloudConfig};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
+use sqweezdb::cloud::{clear_prefix, download, start_puller, start_uploader, CloudConfig};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;
@@ -22,10 +22,10 @@ fn mb(b: u64) -> f64 { b as f64 / 1e6 }
 
 fn main() {
     println!("=== E34: compression and compaction in the bucket (1M rows; local rclone S3 server; Litestream 0.5.17) ===");
-    clear_prefix(&CloudConfig::local("dblab", "")); clear_prefix(&CloudConfig::local("litestream", "")); std::thread::sleep(Duration::from_secs(2));
+    clear_prefix(&CloudConfig::local("sqweezdb", "")); clear_prefix(&CloudConfig::local("litestream", "")); std::thread::sleep(Duration::from_secs(2));
     let dir = PathBuf::from(format!("{DIR}/primary")); let sql = Arc::new(build(&dir)); let st = sql.snapshot();
     // ---- A. compression ----
-    let mut cfg = CloudConfig::local("dblab", "primary"); cfg.compact_after = Duration::from_secs(5); cfg.compact_every = Duration::from_secs(2);
+    let mut cfg = CloudConfig::local("sqweezdb", "primary"); cfg.compact_after = Duration::from_secs(5); cfg.compact_every = Duration::from_secs(2);
     let t = Instant::now(); let up = start_uploader(cfg.clone(), dir.clone(), sql.db.log.clone());
     while up.stats.snapshots.load(Ordering::Relaxed) == 0 { std::thread::sleep(Duration::from_millis(20)); }
     println!("A. snapshot: {:.1} MB on disk -> {:.1} MB in the bucket (zstd level 3, {:.0}x), compressed in {} ms, uploaded in {:.2} s total; E33 uncompressed: 49 MB in 1.1 s", mb(st.bytes), mb(up.stats.bytes.load(Ordering::Relaxed)), st.bytes as f64 / up.stats.bytes.load(Ordering::Relaxed).max(1) as f64, up.stats.compress_ms.load(Ordering::Relaxed), t.elapsed().as_secs_f64());
@@ -40,11 +40,11 @@ fn main() {
     let done = Arc::new(AtomicU64::new(0)); let stop = Arc::new(AtomicBool::new(false)); let puts0 = up.stats.puts.load(Ordering::Relaxed);
     let hs: Vec<_> = (0..64usize).map(|k| { let (sql, done, stop) = (sql.clone(), done.clone(), stop.clone()); std::thread::spawn(move || { let mut s = Session::default(); let ins = sql.prepare("INSERT INTO t VALUES (?,?,?,?)").unwrap(); let mut id = 10_000_000 + k as i64 * 1_000_000; while !stop.load(Ordering::Relaxed) { sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Float(1.0), Value::Int(1), Value::Int(id)]).unwrap(); done.fetch_add(1, Ordering::Relaxed); id += 1; } }) }).collect();
     std::thread::sleep(Duration::from_secs(6)); stop.store(true, Ordering::Relaxed); for h in hs { h.join().unwrap(); } sql.db.log.set_cloud_wait(false, None);
-    let (n_before, b_before) = bucket_objects("dblab", "primary/log"); let puts = up.stats.puts.load(Ordering::Relaxed) - puts0;
+    let (n_before, b_before) = bucket_objects("sqweezdb", "primary/log"); let puts = up.stats.puts.load(Ordering::Relaxed) - puts0;
     println!("B. cloud-durable burst, 64 writers for 6 s: {} commits, {puts} uploads -> the log prefix holds {n_before} objects, {:.1} MB", done.load(Ordering::Relaxed), mb(b_before));
     let t = Instant::now(); let merges0 = up.stats.merges.load(Ordering::Relaxed);
-    let mut last_n = n_before; loop { std::thread::sleep(Duration::from_secs(2)); let (n, _) = bucket_objects("dblab", "primary/log"); if n == last_n && t.elapsed() > Duration::from_secs(8) { break; } last_n = n; if t.elapsed() > Duration::from_secs(60) { break; } }
-    let (n_after, b_after) = bucket_objects("dblab", "primary/log");
+    let mut last_n = n_before; loop { std::thread::sleep(Duration::from_secs(2)); let (n, _) = bucket_objects("sqweezdb", "primary/log"); if n == last_n && t.elapsed() > Duration::from_secs(8) { break; } last_n = n; if t.elapsed() > Duration::from_secs(60) { break; } }
+    let (n_after, b_after) = bucket_objects("sqweezdb", "primary/log");
     println!("B. compaction (chunks older than 5 s, checked every 2 s): {} merges, {} deletes in {:.0} s -> {n_after} objects, {:.1} MB", up.stats.merges.load(Ordering::Relaxed) - merges0, up.stats.deletes.load(Ordering::Relaxed), t.elapsed().as_secs_f64(), mb(b_after));
     // the follower through all of it
     let seq = sql.current_seq(); let t = Instant::now(); while fh.applied() < seq && t.elapsed() < Duration::from_secs(30) { std::thread::sleep(Duration::from_millis(10)); }

@@ -24,7 +24,7 @@ if (!isMainThread) {
 (async () => {
   console.log('=== E41: Node API shape — ours vs better-sqlite3 vs node:sqlite (1M rows) ===');
   const sz = (f) => (fs.statSync(f).size / 1048576).toFixed(1) + ' MB';
-  console.log(`addon size: ours ${sz(path.join(__dirname, 'dblab.node'))}, better-sqlite3 ${sz(require.resolve('better-sqlite3/build/Release/better_sqlite3.node'))}`);
+  console.log(`addon size: ours ${sz(path.join(__dirname, 'sqweezdb.node'))}, better-sqlite3 ${sz(require.resolve('better-sqlite3/build/Release/better_sqlite3.node'))}`);
   const dir = path.join(ROOT, 'e41'); fs.rmSync(dir, { recursive: true, force: true });
   const db = open(dir);
   db.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, score DOUBLE, country INT, name VARCHAR(32))');

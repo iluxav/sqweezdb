@@ -1,7 +1,7 @@
 //! Experiment 15 (H26): joins through SQL, same statements on both sides. 1M users, 5M orders.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

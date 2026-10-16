@@ -1,7 +1,7 @@
 //! Experiment 10 (H17): snapshots. (a) kill -9 while writing WITH periodic snapshots, recover from snapshot + log tail,
 //! verify acks. (b) restart-time rematch vs E09. (c) cost of snapshots to running durable writers.
-use dblab::engine::*;
-use dblab::util::Rng;
+use sqweezdb::engine::*;
+use sqweezdb::util::Rng;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

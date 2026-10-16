@@ -1,10 +1,10 @@
 //! Experiment 40: what a TCP server in front of the engine costs. Same owner process and the same binary protocol as
 //! the Unix socket (E21) and the shared-memory ring (E23), plus a TCP listener on loopback. Point reads show the pure
 //! transport cost; durable inserts show how much of it hides behind fsync. References: in-process ours and SQLite.
-use dblab::net::{Client, Server};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::net::{Client, Server};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

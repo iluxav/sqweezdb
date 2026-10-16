@@ -1,10 +1,10 @@
 [package]
-name = "dblab"
+name = "sqweezdb"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "dblab"
+name = "sqweezdb"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]

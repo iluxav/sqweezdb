@@ -1,9 +1,9 @@
 //! Experiment 26: live backup, point-in-time restore, and a follower replica, all from the log we already trust.
 //! SQLite's side: online backup API (one step) and VACUUM INTO while a writer runs; it has no point-in-time restore
 //! and no follower without external tools (Litestream, LiteFS), so those rows compare against "not available".
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{backup::Backup, params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};

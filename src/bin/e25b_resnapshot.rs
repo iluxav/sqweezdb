@@ -1,8 +1,8 @@
 //! E25b: correctness of snapshots taken from a mapped table (restart -> writes -> snapshot -> restart, twice).
 //! Every key is verified by id and by unique name after each step.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use std::collections::HashMap;
 use std::path::PathBuf;
 

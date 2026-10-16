@@ -63,7 +63,7 @@ export class Database {
   close(): void;
 }
 
-export class DblabError extends Error {
+export class SqweezError extends Error {
   /** CONFLICT, DUPLICATE, FOREIGN_KEY, DENIED, NOT_FOUND, TYPE, ARGUMENTS, TRANSACTION, SYNTAX, SCHEMA, CLOSED or ERROR. */
   code: string;
 }

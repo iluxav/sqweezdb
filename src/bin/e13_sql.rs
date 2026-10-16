@@ -1,7 +1,7 @@
 //! Experiment 13: the SQL round. Identical SQL text on both sides; ours through sqlparser -> plan -> typed storage.
-use dblab::sql::Sql;
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::Sql;
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{Connection, params};
 use std::fs;
 use std::path::PathBuf;

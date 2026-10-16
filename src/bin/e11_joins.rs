@@ -1,5 +1,5 @@
 //! Experiment 11 (H13): the join round. Same 1M users + 5M orders in SQLite (tuned) and in typed contiguous rows.
-use dblab::util::Rng;
+use sqweezdb::util::Rng;
 use rusqlite::{Connection, params};
 use std::fs;
 use std::path::PathBuf;

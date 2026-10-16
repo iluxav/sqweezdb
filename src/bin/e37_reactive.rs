@@ -1,11 +1,11 @@
 //! Experiment 37: reactivity. Filtered change subscriptions with row policies, live queries by invalidation, push to a
 //! second process over the socket; writers are measured with 0, 1,000 and 10,000 subscribers attached. SQLite's only
 //! primitive is sqlite3_update_hook (same process, table + rowid, no filter, no policy, no cross-process).
-use dblab::live::Event;
-use dblab::net::{Client, Server};
-use dblab::sql::{ChangeOp, Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::live::Event;
+use sqweezdb::net::{Client, Server};
+use sqweezdb::sql::{ChangeOp, Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ fn writer(sql: &Arc<Sql>, base: i64, secs: f64, t0: &Instant, only_user: Option<
     while t.elapsed().as_secs_f64() < secs { let u = only_user.unwrap_or_else(|| (rng.next() % NU as u64) as i64 + 1); sql.execute_s(&mut s, &ins, &[Value::Int(id), Value::Int(u), Value::Int(u % 20), Value::Float((id % 1000) as f64), Value::Int(now_us(t0))]).unwrap(); id += 1; n += 1; }
     (n, n as f64 / t.elapsed().as_secs_f64())
 }
-fn drain(subs: &[dblab::live::Subscription], t0: &Instant, lags: &mut Vec<f64>) -> u64 { let mut n = 0; for sub in subs { while let Some(ev) = sub.try_recv() { n += 1; if let Event::Change(c) = ev { if let Some(row) = &c.row { if let Value::Int(ts) = row[4] { if ts > 0 && lags.len() < 2_000_000 { lags.push((now_us(t0) - ts) as f64); } } } } } } n }
+fn drain(subs: &[sqweezdb::live::Subscription], t0: &Instant, lags: &mut Vec<f64>) -> u64 { let mut n = 0; for sub in subs { while let Some(ev) = sub.try_recv() { n += 1; if let Event::Change(c) = ev { if let Some(row) = &c.row { if let Value::Int(ts) = row[4] { if ts > 0 && lags.len() < 2_000_000 { lags.push((now_us(t0) - ts) as f64); } } } } } } n }
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -49,7 +49,7 @@ fn main() {
     for nsubs in [1_000usize, 10_000] {
         let subs: Vec<_> = (0..nsubs).map(|i| re.subscribe(&Session::default(), "SELECT * FROM orders WHERE user_id = ?", &[Value::Int(i as i64 + 1)]).unwrap()).collect();
         let stop = Arc::new(AtomicBool::new(false)); let lags = Arc::new(std::sync::Mutex::new(Vec::<f64>::new())); let got = Arc::new(AtomicU64::new(0));
-        let h = { let (stop, lags, got) = (stop.clone(), lags.clone(), got.clone()); let subs_ptr = &subs as *const Vec<dblab::live::Subscription> as usize; std::thread::spawn(move || { let subs = unsafe { &*(subs_ptr as *const Vec<dblab::live::Subscription>) }; let mut l = vec![]; while !stop.load(Ordering::Relaxed) { let n = drain(subs, &t0, &mut l); if n == 0 { std::thread::sleep(Duration::from_micros(100)); } else { got.fetch_add(n, Ordering::Relaxed); } } std::thread::sleep(Duration::from_millis(50)); got.fetch_add(drain(subs, &t0, &mut l), Ordering::Relaxed); *lags.lock().unwrap() = l; }) };
+        let h = { let (stop, lags, got) = (stop.clone(), lags.clone(), got.clone()); let subs_ptr = &subs as *const Vec<sqweezdb::live::Subscription> as usize; std::thread::spawn(move || { let subs = unsafe { &*(subs_ptr as *const Vec<sqweezdb::live::Subscription>) }; let mut l = vec![]; while !stop.load(Ordering::Relaxed) { let n = drain(subs, &t0, &mut l); if n == 0 { std::thread::sleep(Duration::from_micros(100)); } else { got.fetch_add(n, Ordering::Relaxed); } } std::thread::sleep(Duration::from_millis(50)); got.fetch_add(drain(subs, &t0, &mut l), Ordering::Relaxed); *lags.lock().unwrap() = l; }) };
         let (n, r) = writer(&sql, 2_000_000 + nsubs as i64 * 1_000_000, 3.0, &t0, None); std::thread::sleep(Duration::from_millis(200)); stop.store(true, Ordering::Relaxed); h.join().unwrap();
         let mut l = lags.lock().unwrap().clone(); let expected = n as f64 * nsubs as f64 / NU as f64;
         println!("A. {nsubs:>5} filtered subscribers: writer {:.0} inserts/s ({:.0}% of alone); {} events delivered (expected ~{:.0}); commit -> subscriber p50 {:.0} us, p99 {:.0} us", r, r / r0 * 100.0, got.load(Ordering::Relaxed), expected, pct(&mut l, 0.5), pct(&mut l, 0.99));
@@ -61,7 +61,7 @@ fn main() {
       println!("A. one subscriber, blocking receive, 1000 single inserts: commit -> event p50 {:.0} us, p99 {:.0} us (the fan-out rows above include a 100 us polling sleep in the test's collector)", pct(&mut lags, 0.5), pct(&mut lags, 0.99)); }
     // hot key: 200 subscribers on the same user, writer only writes that user
     { let subs: Vec<_> = (0..200).map(|_| re.subscribe(&Session::default(), "SELECT * FROM orders WHERE user_id = ?", &[Value::Int(5)]).unwrap()).collect(); let stop = Arc::new(AtomicBool::new(false)); let got = Arc::new(AtomicU64::new(0));
-      let h = { let (stop, got) = (stop.clone(), got.clone()); let subs_ptr = &subs as *const Vec<dblab::live::Subscription> as usize; std::thread::spawn(move || { let subs = unsafe { &*(subs_ptr as *const Vec<dblab::live::Subscription>) }; let mut l = vec![]; while !stop.load(Ordering::Relaxed) { let n = drain(subs, &t0, &mut l); if n == 0 { std::thread::sleep(Duration::from_micros(100)); } else { got.fetch_add(n, Ordering::Relaxed); } } std::thread::sleep(Duration::from_millis(50)); got.fetch_add(drain(subs, &t0, &mut l), Ordering::Relaxed); }) };
+      let h = { let (stop, got) = (stop.clone(), got.clone()); let subs_ptr = &subs as *const Vec<sqweezdb::live::Subscription> as usize; std::thread::spawn(move || { let subs = unsafe { &*(subs_ptr as *const Vec<sqweezdb::live::Subscription>) }; let mut l = vec![]; while !stop.load(Ordering::Relaxed) { let n = drain(subs, &t0, &mut l); if n == 0 { std::thread::sleep(Duration::from_micros(100)); } else { got.fetch_add(n, Ordering::Relaxed); } } std::thread::sleep(Duration::from_millis(50)); got.fetch_add(drain(subs, &t0, &mut l), Ordering::Relaxed); }) };
       let (n, r) = writer(&sql, 30_000_000, 2.0, &t0, Some(5)); std::thread::sleep(Duration::from_millis(300)); stop.store(true, Ordering::Relaxed); h.join().unwrap();
       let overflow = subs.iter().filter(|s| s.q.closed.load(Ordering::Relaxed)).count();
       println!("A. 200 subscribers on one hot user, writer {:.0} inserts/s of that user: {} events delivered of {} ({} subscribers overflowed and were dropped)", r, got.load(Ordering::Relaxed), n * 200, overflow); drop(subs); }

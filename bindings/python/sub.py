@@ -1,8 +1,8 @@
 import os, shutil, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pydblab
+import sqweezdb
 d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../data/nocow/pysub"); shutil.rmtree(d, ignore_errors=True)
-db = pydblab.Database(d); s = db.session(); s.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT, amount DOUBLE, ts INT)")
+db = sqweezdb.Database(d); s = db.session(); s.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY, user_id INT, amount DOUBLE, ts INT)")
 sub = db.session().subscribe("SELECT * FROM orders WHERE user_id = ?", (42,)); ins = db.prepare("INSERT INTO orders VALUES (?,?,?,?)")
 lags = []
 def consumer():

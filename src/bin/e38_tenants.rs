@@ -1,11 +1,11 @@
 //! Experiment 38: database per tenant at scale. 10,000 tenants with 10 rows each, in one process: creation, memory,
 //! threads, random access across all tenants, eviction and reopen under a residency limit, fleet schema migration with
 //! writers running, per-tenant backup to a bucket prefix with a per-tenant key. SQLite and Turso: 10,000 files each.
-use dblab::cloud::{clear_prefix, download, CloudConfig};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::tenants::TenantHost;
-use dblab::util::Rng;
+use sqweezdb::cloud::{clear_prefix, download, CloudConfig};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::tenants::TenantHost;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;
@@ -51,8 +51,8 @@ fn ours() {
     let s = host.get("t00007", INIT).unwrap(); let mut se = Session::default(); let chk = s.exec_s(&mut se, "SELECT flag FROM notes WHERE id = 1", &[]).unwrap();
     println!("ours    fleet migration ADD COLUMN on 1,000 tenants with 4 writer threads running on them: {:.2} s ({:.1} ms per tenant), {bad} failures, writers' worst stall {:.1} ms over {} inserts; tenant 7 reads flag = {:?}", mig.as_secs_f64(), mig.as_secs_f64() * 1e3 / 1000.0, worst.load(Ordering::Relaxed) as f64 / 1e3, wn.load(Ordering::Relaxed), chk[0][0]);
     // per-tenant backup: 200 tenants, each under its own prefix with its own passphrase
-    clear_prefix(&CloudConfig::local("dblab", "tenants")); std::thread::sleep(Duration::from_millis(1500));
-    let cfg = CloudConfig::local("dblab", "tenants"); let t = Instant::now();
+    clear_prefix(&CloudConfig::local("sqweezdb", "tenants")); std::thread::sleep(Duration::from_millis(1500));
+    let cfg = CloudConfig::local("sqweezdb", "tenants"); let t = Instant::now();
     for i in 0..200 { host.backup(&format!("t{i:05}"), cfg.clone(), Some(&format!("secret-of-tenant-{i}"))).unwrap(); }
     let deadline = Instant::now() + Duration::from_secs(60); let mut done = 0; while done < 200 && Instant::now() < deadline { done = (0..200).filter(|i| host.backup_done(&format!("t{i:05}"))).count(); std::thread::sleep(Duration::from_millis(50)); }
     let bt = t.elapsed(); for i in 0..200 { host.stop_backup(&format!("t{i:05}")); }

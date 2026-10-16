@@ -1,7 +1,7 @@
 //! Experiment 19b (H28): where does the scan time go? Same 5M-row orders table, measured layer by layer.
-use dblab::sql::{Session, Sql};
-use dblab::table::{read_i64, Value, CHUNK_ROWS};
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::{read_i64, Value, CHUNK_ROWS};
+use sqweezdb::util::Rng;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -34,7 +34,7 @@ fn main() {
     pr("L3 Table::scan closure summing the key", median(5, || { let mut s = 0i64; orders.scan(|r| { s = s.wrapping_add(read_i64(r, uoff)); true }); s as f64 }), n);
     // L4: scan + bitmap probe (J1 shape, hand-rolled over the engine)
     let mut bits = vec![0u64; (USERS as usize >> 6) + 2]; users.scan(|r| { if read_i64(r, users.schema.offsets[2]) == 7 { let id = read_i64(r, users.schema.offsets[0]) as usize; bits[id >> 6] |= 1 << (id & 63); } true });
-    pr("L4 Table::scan + bitmap probe + count/sum on hits (J1 by hand)", median(5, || { let mut c = 0u64; let mut s = 0.0; orders.scan(|r| { let k = read_i64(r, uoff) as usize; if bits[k >> 6] >> (k & 63) & 1 == 1 { c += 1; s += dblab::table::read_f64(r, aoff); } true }); let _ = c; s }), n);
+    pr("L4 Table::scan + bitmap probe + count/sum on hits (J1 by hand)", median(5, || { let mut c = 0u64; let mut s = 0.0; orders.scan(|r| { let k = read_i64(r, uoff) as usize; if bits[k >> 6] >> (k & 63) & 1 == 1 { c += 1; s += sqweezdb::table::read_f64(r, aoff); } true }); let _ = c; s }), n);
     // L5: through SQL
     pr("L5 SQL: SELECT count(*), sum(amount) FROM orders", median(5, || { let r = sql.exec_s(&mut app, "SELECT count(*), sum(amount) FROM orders", &[]).unwrap(); match r[0][1] { Value::Float(f) => f, _ => 0.0 } }), n);
     pr("L6 SQL: SELECT count(*) FROM orders WHERE status = 2", median(5, || { let r = sql.exec_s(&mut app, "SELECT count(*) FROM orders WHERE status = 2", &[]).unwrap(); match r[0][0] { Value::Int(i) => i as f64, _ => 0.0 } }), n);

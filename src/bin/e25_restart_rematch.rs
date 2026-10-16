@@ -1,9 +1,9 @@
 //! Experiment 25 (H19 + cold tiers): restart and memory rematch. The snapshot is now the table: slot layout sorted by
 //! key, mapped privately on restart. 2M rows. Each configuration runs in its own process; "cold" evicts the files from
 //! the page cache first; "limited" runs cold inside a cgroup with a hard memory cap (systemd-run --user --scope).
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::os::unix::io::AsRawFd;

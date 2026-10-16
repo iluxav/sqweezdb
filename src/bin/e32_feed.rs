@@ -1,9 +1,9 @@
 //! Experiment 32: a change feed. Ours: subscribe to the log, decoded, resumable by sequence number. SQLite has no such
 //! thing; the do-it-yourself version is AFTER INSERT/UPDATE/DELETE triggers writing an audit table that a consumer polls.
 //! Rows carry the writer's clock so a consumer can measure the delay from commit to visibility.
-use dblab::sql::{ChangeOp, Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{ChangeOp, Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

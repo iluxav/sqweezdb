@@ -573,22 +573,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
-name = "dblab"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "futures-util",
- "memmap2",
- "object_store",
- "rusqlite",
- "sha2",
- "sqlparser",
- "tokio",
- "turso",
- "zstd",
-]
-
-[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1982,14 +1966,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pydblab"
-version = "0.1.0"
-dependencies = [
- "dblab",
- "pyo3",
-]
-
-[[package]]
 name = "pyo3"
 version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,6 +2764,30 @@ checksum = "3679862809bd1f92e563cf6fd820e28f39135303668001c10331d5027183e8b4"
 dependencies = [
  "log",
  "recursive",
+]
+
+[[package]]
+name = "sqweezdb"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "futures-util",
+ "memmap2",
+ "object_store",
+ "rusqlite",
+ "sha2",
+ "sqlparser",
+ "tokio",
+ "turso",
+ "zstd",
+]
+
+[[package]]
+name = "sqweezdb-python"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "sqweezdb",
 ]
 
 [[package]]

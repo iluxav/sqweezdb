@@ -1,7 +1,7 @@
 //! Experiment 22 (H21 + H22): memory and restart rematch for the SQL storage. 2M rows, each configuration in its own process.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4; const K_SUB: u8 = 5; const K_AUTH: u8 = 6;
 /// Where a local client may place its shared-memory ring; the server refuses any other path (it writes into that file).
-const SHM_DIR: &str = "/dev/shm/"; const SHM_PREFIX: &str = "dblab-ring-";
+const SHM_DIR: &str = "/dev/shm/"; const SHM_PREFIX: &str = "sqweezdb-ring-";
 fn same_secret(a: &[u8], b: &[u8]) -> bool { let mut d = (a.len() != b.len()) as u8; for i in 0..a.len().min(b.len()) { d |= a[i] ^ b[i]; } d == 0 }
 // shared-memory ring: one outstanding request per connection, both sides spin briefly then back off
 const SHM_SIZE: usize = 2 << 20; const REQ_OFF: usize = 64; const REQ_CAP: usize = 1 << 20; const RESP_OFF: usize = REQ_OFF + REQ_CAP; const RESP_CAP: usize = SHM_SIZE - RESP_OFF;
@@ -20,9 +20,12 @@ struct Ring { map: memmap2::MmapMut }
 unsafe impl Send for Ring {}
 impl Ring {
     fn open(path: &Path, create: bool) -> std::io::Result<Ring> {
-        let f = std::fs::OpenOptions::new().read(true).write(true).create(create).open(path)?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mut o = std::fs::OpenOptions::new(); o.read(true).write(true).create(create);
+        if !create { o.custom_flags(0o400000); }  // O_NOFOLLOW: the server never follows a symlink a client planted
+        let f = o.open(path)?;
         if create { f.set_len(SHM_SIZE as u64)?; }
-        else { let m = f.metadata()?; if !m.is_file() || m.len() != SHM_SIZE as u64 { return Err(std::io::Error::other("ring file must be a regular file of the ring size")); } }
+        else { let m = f.metadata()?; if !m.is_file() || m.len() != SHM_SIZE as u64 || m.nlink() != 1 { return Err(std::io::Error::other("ring file must be a plain regular file of the ring size")); } }
         Ok(Ring { map: unsafe { memmap2::MmapMut::map_mut(&f)? } })
     }
     #[inline] fn word(&self, off: usize) -> &AtomicU32 { unsafe { &*(self.map.as_ptr().add(off) as *const AtomicU32) } }
@@ -151,7 +154,7 @@ impl Server {
                 // the client created a ring file under SHM_DIR; serve it from a dedicated thread, the socket stays for shutdown
                 let path = String::from_utf8_lossy(&req[1..]).into_owned();
                 let allowed = !remote && path.starts_with(SHM_DIR) && path[SHM_DIR.len()..].starts_with(SHM_PREFIX) && !path[SHM_DIR.len()..].contains('/') && !path.contains("..");
-                let r: Result<Vec<Vec<Value>>, String> = match if allowed { Ring::open(Path::new(&path), false) } else { Err(std::io::Error::other(if remote { "shared memory is for local clients" } else { "ring files must be /dev/shm/dblab-ring-*" })) } {
+                let r: Result<Vec<Vec<Value>>, String> = match if allowed { Ring::open(Path::new(&path), false) } else { Err(std::io::Error::other(if remote { "shared memory is for local clients" } else { "ring files must be /dev/shm/sqweezdb-ring-*" })) } {
                     Ok(ring) => { let closer = Arc::new(std::sync::atomic::AtomicBool::new(false)); ring_closer = Some(closer.clone()); let sql2 = sql.clone(); std::thread::spawn(move || Self::serve_ring(sql2, ring, closer)); Ok(vec![]) }
                     Err(e) => Err(e.to_string()),
                 };

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"dblab/bench/dblab"
+	"github.com/iluxav/sqweezdb/bindings/go/sqweezdb"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -18,7 +18,7 @@ func main() {
 	fmt.Println("=== Go bindings: ours (cgo over the C ABI) vs go-sqlite3 (cgo, database/sql); 1M rows ===")
 	// ---- ours ----
 	os.RemoveAll("../../data/nocow/gobench")
-	db, err := dblab.Open("../../data/nocow/gobench", false)
+	db, err := sqweezdb.Open("../../data/nocow/gobench", false)
 	if err != nil {
 		panic(err)
 	}

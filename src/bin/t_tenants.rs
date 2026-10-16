@@ -1,5 +1,5 @@
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
 use std::path::PathBuf;
 use std::time::Instant;
 fn rss() -> f64 { let s = std::fs::read_to_string("/proc/self/status").unwrap(); s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0 }

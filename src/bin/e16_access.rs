@@ -1,8 +1,8 @@
 //! Experiment 16 (goal 4): access control. Roles, users with attributes, table grants, row policies. Tenant isolation end to end,
 //! and what it costs. SQLite has none of this: every connection sees every row.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;

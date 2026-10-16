@@ -1,7 +1,7 @@
 //! Experiment 07 (H16 + index round): ONE engine, replay the writer tests (E05) and the scan tests (E06) on it,
 //! plus the unplayed events: lookup by unique secondary key (email) and ordered PK range scan.
-use dblab::engine::*;
-use dblab::util::Rng;
+use sqweezdb::engine::*;
+use sqweezdb::util::Rng;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs;

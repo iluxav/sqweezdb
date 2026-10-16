@@ -1,9 +1,9 @@
 //! Experiment 33: continuous backup to an S3-compatible bucket, restore (plain and point-in-time), a follower fed only
 //! by the bucket, and a cloud-durable commit mode; against Litestream doing the same for SQLite. The bucket is a local
 //! rclone S3 server (real S3 API over loopback), so request latency here is ~1 ms; a real cloud adds 20–80 ms per request.
-use dblab::cloud::{clear_prefix, download, start_puller, start_uploader, CloudConfig};
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
+use sqweezdb::cloud::{clear_prefix, download, start_puller, start_uploader, CloudConfig};
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -27,7 +27,7 @@ fn main() {
     // ---- crash victim: primary + uploader, writes sequential ids at ~2k/s and prints each acknowledged id ----
     if a.get(1).map(|s| s.as_str()) == Some("victim") {
         let dir = PathBuf::from(format!("{DIR}/victim")); let sql = build(&dir); sql.snapshot();
-        let mut cfg = CloudConfig::local("dblab", "victim"); if a.get(2).map(|s| s.as_str()) == Some("fast") { cfg.interval = Duration::from_millis(100); } let up = start_uploader(cfg, dir.clone(), sql.db.log.clone());
+        let mut cfg = CloudConfig::local("sqweezdb", "victim"); if a.get(2).map(|s| s.as_str()) == Some("fast") { cfg.interval = Duration::from_millis(100); } let up = start_uploader(cfg, dir.clone(), sql.db.log.clone());
         while up.stats.snapshots.load(Ordering::Relaxed) == 0 { std::thread::sleep(Duration::from_millis(50)); }
         if a.get(2).map(|s| s.as_str()) == Some("durable") { sql.db.log.set_cloud_wait(true, Some(up.kick.clone())); }
         println!("ready"); std::io::stdout().flush().unwrap();
@@ -43,11 +43,11 @@ fn main() {
         loop { c.execute("INSERT INTO t VALUES (?,?,?,?)", params![id, 1.0f64, 1, 0]).unwrap(); writeln!(o, "{id}").unwrap(); o.flush().unwrap(); id += 1; std::thread::sleep(Duration::from_micros(400)); }
     }
     println!("=== E33: backup to an S3-compatible bucket (1M rows; local rclone S3 server; Litestream 0.5.17 for SQLite) ===");
-    clear_prefix(&CloudConfig::local("dblab", "")); clear_prefix(&CloudConfig::local("litestream", "")); std::thread::sleep(Duration::from_secs(2));
+    clear_prefix(&CloudConfig::local("sqweezdb", "")); clear_prefix(&CloudConfig::local("litestream", "")); std::thread::sleep(Duration::from_secs(2));
     // ---- A. continuous backup: upload cadence, lag, cost ----
     let dir = PathBuf::from(format!("{DIR}/primary")); let sql = Arc::new(build(&dir)); let st = sql.snapshot();
-    let cfg = CloudConfig::local("dblab", "primary"); let t = Instant::now(); let mut up = Some(start_uploader(cfg.clone(), dir.clone(), sql.db.log.clone()));
-    let upr = |up: &Option<dblab::cloud::Uploader>| up.as_ref().unwrap().stats.clone();
+    let cfg = CloudConfig::local("sqweezdb", "primary"); let t = Instant::now(); let mut up = Some(start_uploader(cfg.clone(), dir.clone(), sql.db.log.clone()));
+    let upr = |up: &Option<sqweezdb::cloud::Uploader>| up.as_ref().unwrap().stats.clone();
     while upr(&up).snapshots.load(Ordering::Relaxed) == 0 { std::thread::sleep(Duration::from_millis(20)); }
     println!("A. snapshot of {} rows ({:.0} MB) uploaded in {:.2} s", st.rows, st.bytes as f64 / 1e6, t.elapsed().as_secs_f64());
     let commits: Arc<std::sync::Mutex<Vec<(u64, Instant)>>> = Arc::new(std::sync::Mutex::new(vec![])); let stop = Arc::new(AtomicBool::new(false));
@@ -80,7 +80,7 @@ fn main() {
     let good = count(&sql); let good_seq = sql.current_seq(); let mut s = Session::default();
     let bad = sql.exec_s(&mut s, "DELETE FROM t WHERE country < 10", &[]).unwrap(); for id in 30_000_000..30_010_000i64 { sql.exec_s(&mut s, "INSERT INTO t VALUES (?,?,?,?)", &[Value::Int(id), Value::Float(1.0), Value::Int(1), Value::Int(0)]).unwrap(); }
     let seq = sql.current_seq(); while upr(&up).cloud_seq.load(Ordering::Relaxed) < seq { std::thread::sleep(Duration::from_millis(20)); }
-    let (objs, bytes) = bucket_objects("dblab");
+    let (objs, bytes) = bucket_objects("sqweezdb");
     let rdir = PathBuf::from(format!("{DIR}/restored")); let t = Instant::now(); let (s0, chunks, dl) = download(&cfg, &rdir).unwrap(); let dlt = t.elapsed();
     let t = Instant::now(); let (r, rs) = Sql::restore(&rdir, &PathBuf::from(format!("{DIR}/restored2")), good_seq, 12).unwrap(); let rt = t.elapsed();
     println!("C. bucket holds {objs} objects, {:.0} MB. Bad DELETE of {:?} rows then 10k inserts. Restore to the moment before it: download {chunks} chunks + snapshot (s0 {s0}) {:.0} MB in {:.2} s, replay to seq {good_seq} ({} records) {:.2} s -> {} rows vs {good} then: {}", bytes as f64 / 1e6, bad[0][0], dl as f64 / 1e6, dlt.as_secs_f64(), rs.replayed, rt.as_secs_f64(), count(&r), if count(&r) == good { "EXACT" } else { "MISMATCH" });
@@ -101,12 +101,12 @@ fn main() {
     drop(puller); drop(fh); drop(fol); up = None; let _ = up; drop(sql); let _ = fs::remove_dir_all(DIR);
     // ---- E. crash: how much is lost? ours vs litestream, 1 s cadence both ----
     for (i, (mode, label)) in [("plain", "1 s upload cadence"), ("plain", "1 s upload cadence"), ("plain", "1 s upload cadence"), ("fast", "100 ms cadence"), ("durable", "cloud-durable commits")].into_iter().enumerate() { let kill_after = Duration::from_millis(5000 + 370 * i as u64);
-        clear_prefix(&CloudConfig::local("dblab", "")); std::thread::sleep(Duration::from_millis(1500)); let _ = fs::remove_dir_all(format!("{DIR}/victim"));
+        clear_prefix(&CloudConfig::local("sqweezdb", "")); std::thread::sleep(Duration::from_millis(1500)); let _ = fs::remove_dir_all(format!("{DIR}/victim"));
         let mut child = Command::new(std::env::current_exe().unwrap()).args(["victim", mode]).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
         let out = child.stdout.take().unwrap(); let mut lines = BufReader::new(out).lines(); while let Some(Ok(l)) = lines.next() { if l == "ready" { break; } }
         let t = Instant::now(); let mut last_ack = 0i64; let mut n = 0u64; while t.elapsed() < kill_after { if let Some(Ok(l)) = lines.next() { if let Ok(id) = l.parse::<i64>() { last_ack = id; n += 1; } } else { break; } }
         child.kill().unwrap(); child.wait().unwrap();
-        let vcfg = CloudConfig::local("dblab", "victim"); let vdir = PathBuf::from(format!("{DIR}/victim-restored")); let t = Instant::now(); let (_, chunks, bytes) = download(&vcfg, &vdir).unwrap(); let (r, _) = Sql::open(&vdir, false, 12).unwrap(); let rt = t.elapsed();
+        let vcfg = CloudConfig::local("sqweezdb", "victim"); let vdir = PathBuf::from(format!("{DIR}/victim-restored")); let t = Instant::now(); let (_, chunks, bytes) = download(&vcfg, &vdir).unwrap(); let (r, _) = Sql::open(&vdir, false, 12).unwrap(); let rt = t.elapsed();
         let got = max_id(&r); let rate = n as f64 / kill_after.as_secs_f64(); println!("E. ours, {label}: {:.0} acknowledged writes/s for {:.1} s, kill -9, restore from the bucket in {:.2} s ({chunks} chunks, {:.0} MB); last acknowledged id {last_ack}, last id in the bucket {got} -> {} rows lost (the last {:.0} ms of writes)", rate, kill_after.as_secs_f64(), rt.as_secs_f64(), bytes as f64 / 1e6, last_ack - got, (last_ack - got) as f64 / rate * 1e3); drop(r);
     }
     // litestream

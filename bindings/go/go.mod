@@ -1,4 +1,4 @@
-module dblab/bench
+module github.com/iluxav/sqweezdb/bindings/go
 
 go 1.24
 

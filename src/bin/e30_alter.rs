@@ -2,9 +2,9 @@
 //! thread run through every ALTER on both engines. Ours: online rebuild (shadow table, mirrored writes, background copy,
 //! swap). SQLite: ADD/DROP/RENAME COLUMN natively, type changes and NOT NULL through the documented copy-the-table recipe
 //! inside one transaction. Then: kill -9 in the middle of our copy, restart, the change completes.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

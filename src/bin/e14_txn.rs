@@ -1,8 +1,8 @@
 //! Experiment 14 (H24): multi-statement transactions through SQL. Bulk load in 1000-row transactions, concurrent
 //! money transfers with an invariant, durable multi-row commits, read-your-writes and rollback.
-use dblab::sql::{Session, Sql};
-use dblab::table::Value;
-use dblab::util::Rng;
+use sqweezdb::sql::{Session, Sql};
+use sqweezdb::table::Value;
+use sqweezdb::util::Rng;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;
