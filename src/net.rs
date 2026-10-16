@@ -9,7 +9,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
 
-const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4; const K_SUB: u8 = 5;
+const K_LOGIN: u8 = 1; const K_EXEC: u8 = 2; const K_BATCH: u8 = 3; const K_SHM: u8 = 4; const K_SUB: u8 = 5; const K_AUTH: u8 = 6;
+/// Where a local client may place its shared-memory ring; the server refuses any other path (it writes into that file).
+const SHM_DIR: &str = "/dev/shm/"; const SHM_PREFIX: &str = "dblab-ring-";
+fn same_secret(a: &[u8], b: &[u8]) -> bool { let mut d = (a.len() != b.len()) as u8; for i in 0..a.len().min(b.len()) { d |= a[i] ^ b[i]; } d == 0 }
 // shared-memory ring: one outstanding request per connection, both sides spin briefly then back off
 const SHM_SIZE: usize = 2 << 20; const REQ_OFF: usize = 64; const REQ_CAP: usize = 1 << 20; const RESP_OFF: usize = REQ_OFF + REQ_CAP; const RESP_CAP: usize = SHM_SIZE - RESP_OFF;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,6 +22,7 @@ impl Ring {
     fn open(path: &Path, create: bool) -> std::io::Result<Ring> {
         let f = std::fs::OpenOptions::new().read(true).write(true).create(create).open(path)?;
         if create { f.set_len(SHM_SIZE as u64)?; }
+        else { let m = f.metadata()?; if !m.is_file() || m.len() != SHM_SIZE as u64 { return Err(std::io::Error::other("ring file must be a regular file of the ring size")); } }
         Ok(Ring { map: unsafe { memmap2::MmapMut::map_mut(&f)? } })
     }
     #[inline] fn word(&self, off: usize) -> &AtomicU32 { unsafe { &*(self.map.as_ptr().add(off) as *const AtomicU32) } }
@@ -110,33 +114,44 @@ impl Server {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
                 let sql = sql.clone();
-                std::thread::spawn(move || { let _ = Self::serve(sql, stream); });
+                std::thread::spawn(move || { let _ = Self::serve(sql, stream, None, false); });
             }
         }))
     }
     /// The same protocol on a TCP address (e.g. "0.0.0.0:7781"), for clients on other hosts; one thread per connection.
-    pub fn start_tcp(sql: Arc<Sql>, addr: &str) -> std::io::Result<std::thread::JoinHandle<()>> {
-        let listener = TcpListener::bind(addr)?;
+    /// `token` is a shared secret every connection must present first (sent in the clear: pair it with a private
+    /// network or a TLS tunnel until H55). Remote clients cannot use shared-memory rings.
+    pub fn start_tcp(sql: Arc<Sql>, addr: &str, token: &str) -> std::io::Result<std::thread::JoinHandle<()>> {
+        if token.is_empty() { return Err(std::io::Error::other("a TCP listener needs a non-empty token")); }
+        let listener = TcpListener::bind(addr)?; let token: Arc<str> = Arc::from(token);
         Ok(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
                 stream.set_nodelay(true).ok();
-                let sql = sql.clone();
-                std::thread::spawn(move || { let _ = Self::serve(sql, stream); });
+                let (sql, token) = (sql.clone(), token.clone());
+                std::thread::spawn(move || { let _ = Self::serve(sql, stream, Some(token), true); });
             }
         }))
     }
-    fn serve<S: Stream>(sql: Arc<Sql>, stream: S) -> std::io::Result<()> {
+    fn serve<S: Stream>(sql: Arc<Sql>, stream: S, token: Option<Arc<str>>, remote: bool) -> std::io::Result<()> {
         let mut r = BufReader::with_capacity(1 << 16, stream.dup()?); let mut w = BufWriter::with_capacity(1 << 16, stream);
         let mut sess = Session::default(); let mut out = Vec::with_capacity(1 << 16);
         let mut ring_closer: Option<Arc<std::sync::atomic::AtomicBool>> = None;
+        if let Some(t) = &token {
+            // first frame must be the token; anything else closes the connection without a hint
+            let req = read_frame(&mut r)?;
+            if req.first() != Some(&K_AUTH) || !same_secret(&req[1..], t.as_bytes()) { encode_result(&mut out, &Err("authentication failed".into())); write_frame(&mut w, &out)?; return Ok(()); }
+            encode_result(&mut out, &Ok(vec![])); write_frame(&mut w, &out)?;
+        }
         loop {
             let req = match read_frame(&mut r) { Ok(b) => b, Err(_) => { if let Some(c) = &ring_closer { c.store(true, Ordering::Relaxed); } return Ok(()) } };
             out.clear();
+            if req.is_empty() { continue; }
             if req[0] == K_SHM {
-                // the client created a ring file; serve it from a dedicated thread, the socket stays for shutdown
+                // the client created a ring file under SHM_DIR; serve it from a dedicated thread, the socket stays for shutdown
                 let path = String::from_utf8_lossy(&req[1..]).into_owned();
-                let r: Result<Vec<Vec<Value>>, String> = match Ring::open(Path::new(&path), false) {
+                let allowed = !remote && path.starts_with(SHM_DIR) && path[SHM_DIR.len()..].starts_with(SHM_PREFIX) && !path[SHM_DIR.len()..].contains('/') && !path.contains("..");
+                let r: Result<Vec<Vec<Value>>, String> = match if allowed { Ring::open(Path::new(&path), false) } else { Err(std::io::Error::other(if remote { "shared memory is for local clients" } else { "ring files must be /dev/shm/dblab-ring-*" })) } {
                     Ok(ring) => { let closer = Arc::new(std::sync::atomic::AtomicBool::new(false)); ring_closer = Some(closer.clone()); let sql2 = sql.clone(); std::thread::spawn(move || Self::serve_ring(sql2, ring, closer)); Ok(vec![]) }
                     Err(e) => Err(e.to_string()),
                 };
@@ -179,13 +194,17 @@ pub struct Client { r: BufReader<Box<dyn Read + Send>>, w: BufWriter<Box<dyn Wri
 impl Client {
     fn from_stream<S: Stream>(s: S) -> std::io::Result<Client> { Ok(Client { r: BufReader::with_capacity(1 << 16, Box::new(s.dup()?)), w: BufWriter::with_capacity(1 << 16, Box::new(s)), buf: Vec::with_capacity(1 << 16), ring: None }) }
     pub fn connect(path: &Path) -> std::io::Result<Client> { Self::from_stream(UnixStream::connect(path)?) }
-    /// Connect over TCP to an owner started with `Server::start_tcp`.
-    pub fn connect_tcp(addr: &str) -> std::io::Result<Client> { let s = TcpStream::connect(addr)?; s.set_nodelay(true)?; Self::from_stream(s) }
+    /// Connect over TCP to an owner started with `Server::start_tcp`, presenting its token.
+    pub fn connect_tcp(addr: &str, token: &str) -> std::io::Result<Client> {
+        let s = TcpStream::connect(addr)?; s.set_nodelay(true)?; let mut c = Self::from_stream(s)?;
+        c.buf.clear(); c.buf.push(K_AUTH); c.buf.extend_from_slice(token.as_bytes());
+        let resp = c.round_trip().map_err(std::io::Error::other)?; decode_result(&resp, &mut 0).map_err(std::io::Error::other)?; Ok(c)
+    }
     /// Connect, then switch to a shared-memory ring (a file under `shm_dir`, e.g. /dev/shm) for round trips.
     pub fn connect_shm(path: &Path, shm_dir: &Path) -> std::io::Result<Client> {
         let mut c = Client::connect(path)?;
         static N: AtomicU32 = AtomicU32::new(0);
-        let ring_path = shm_dir.join(format!("dblab-ring-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let ring_path = shm_dir.join(format!("{SHM_PREFIX}{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let ring = Ring::open(&ring_path, true)?;
         c.buf.clear(); c.buf.push(K_SHM); c.buf.extend_from_slice(ring_path.to_string_lossy().as_bytes());
         let resp = c.round_trip().map_err(|e| std::io::Error::other(e))?;

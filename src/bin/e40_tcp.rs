@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
-const N: i64 = 1_000_000; const SOCK: &str = "data/nocow/e40.sock"; const TCP: &str = "127.0.0.1:7781"; const SQLITE: &str = "data/nocow/e40.sqlite";
+const N: i64 = 1_000_000; const SOCK: &str = "data/nocow/e40.sock"; const TCP: &str = "127.0.0.1:7781"; const TOKEN: &str = "e40-lab-token"; const SQLITE: &str = "data/nocow/e40.sqlite";
 const SEL: &str = "SELECT score FROM t WHERE id = ?"; const INS: &str = "INSERT INTO t VALUES (?,?,?,?,?,?)";
 fn row(id: i64) -> Vec<Value> { vec![Value::Int(id), Value::Float(id as f64), Value::Int(id % 20), Value::Int(18 + id % 60), Value::Text(format!("u{id}@example.com")), Value::Bytes(vec![7; 64])] }
 fn pr(label: &str, n: usize, el: f64) { println!("{:<80} {:>9.2} us/op  {:>9.0} ops/s", label, el * 1e6 / n as f64, n as f64 / el); }
@@ -22,7 +22,7 @@ fn ping(host: &str) -> String { let out = Command::new("ping").args(["-c", "20",
 #[derive(Clone, Copy)] enum T { Tcp, Sock, Shm }
 impl T {
     fn name(self) -> &'static str { match self { T::Tcp => "TCP loopback", T::Sock => "unix socket", T::Shm => "shared-memory ring" } }
-    fn connect(self) -> Client { match self { T::Tcp => Client::connect_tcp(TCP).unwrap(), T::Sock => Client::connect(&PathBuf::from(SOCK)).unwrap(), T::Shm => Client::connect_shm(&PathBuf::from(SOCK), &PathBuf::from("/dev/shm")).unwrap() } }
+    fn connect(self) -> Client { match self { T::Tcp => Client::connect_tcp(TCP, TOKEN).unwrap(), T::Sock => Client::connect(&PathBuf::from(SOCK)).unwrap(), T::Shm => Client::connect_shm(&PathBuf::from(SOCK), &PathBuf::from("/dev/shm")).unwrap() } }
 }
 
 fn client_main() {
@@ -77,7 +77,8 @@ fn main() {
       b.wait(); let t0 = Instant::now(); for h in hs { h.join().unwrap(); } pr("[ours, in-process] inserts, durable, 8 threads", threads * per, t0.elapsed().as_secs_f64()); }
 
     // second process over the three transports
-    let _unix = Server::start(sql.clone(), &PathBuf::from(SOCK)).unwrap(); let _tcp = Server::start_tcp(sql.clone(), TCP).unwrap();
+    let _unix = Server::start(sql.clone(), &PathBuf::from(SOCK)).unwrap(); let _tcp = Server::start_tcp(sql.clone(), TCP, TOKEN).unwrap();
+    { let bad = Client::connect_tcp(TCP, "wrong"); let shm = Client::connect_shm(&PathBuf::from(SOCK), &PathBuf::from("/tmp")); println!("wrong token over TCP: {} | ring outside /dev/shm: {}", if bad.is_err() { "refused" } else { "ACCEPTED (bug)" }, if shm.is_err() { "refused" } else { "ACCEPTED (bug)" }); }
     let mut child = Command::new(std::env::current_exe().unwrap()).arg("client").stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
     let rd = BufReader::new(child.stdout.take().unwrap()); for line in rd.lines() { let l = line.unwrap(); if l == "CLIENT_DONE" { break; } println!("{l}"); } child.wait().unwrap();
     let r = sql.exec_s(&mut app, "SELECT count(*) FROM t", &[]).unwrap(); println!("owner sees count(*) = {:?} (1,000,000 + 2,000 + 40,000 in-process + 3 x 42,000 from the client = 1,168,000)", r[0][0]);
