@@ -109,7 +109,7 @@ and switches to the static musl build on Alpine.
 
 | Variable | Effect |
 |---|---|
-| `SQWEEZDB_VERSION=v0.1.0` | Install a specific release instead of the latest. |
+| `SQWEEZDB_VERSION=v0.2.0` | Install a specific release instead of the latest. |
 | `SQWEEZDB_INSTALL_DIR=/opt/bin` | Install somewhere else. |
 | `SQWEEZDB_LIBC=musl` | Force the static musl build on Linux. |
 
@@ -404,6 +404,9 @@ Everything is built on the change log, so backups never pause the database.
   committed them.
 - **Point-in-time restore** to any log position is available from the Rust API
   (`Sql::backup` and `Sql::restore`).
+- **Outages.** If the bucket stops answering, writes continue and the uploader retries with a growing
+  pause, up to 30 seconds; when the bucket is back it catches up on its own. With `durable: 'cloud'`,
+  commits wait for the bucket instead. A malformed `endpoint` is refused when the database opens.
 
 ### Web console and command line
 
@@ -419,8 +422,9 @@ generated and printed once. `Ctrl-C` stops cleanly, writing a final snapshot so 
 instant.
 
 The console has a table browser, a form to create and alter tables, a SQL editor with a **Live** toggle
-that keeps results current, a feed of changes, the status of the log, snapshots and backup, and the
-roles, grants and policies. It is one HTML page compiled into the binary, with no build step. Bind it
+that keeps results current, a feed of changes, and the roles, grants and policies. Its **Backup** tab
+shows whether uploads are healthy, how far the bucket is behind, the last error and a connection test;
+when backup is off, it writes the settings file and the restart command for your bucket. It is one HTML page compiled into the binary, with no build step. Bind it
 to loopback unless you intend otherwise: it acts as the application and sees everything.
 
 An embedded database can serve the same console from inside your application:
@@ -616,7 +620,7 @@ Turso on the same machine, one question each; their outputs are in `results/`. T
 feature and a system `libsqlite3` with headers: `cargo lab e40_tcp` runs one, and `make lab` builds
 them all.
 
-Releases are tags that match the version in `Cargo.toml`, such as `v0.1.0`. The release workflow builds
+Releases are tags that match the version in `Cargo.toml`, such as `v0.2.0`. The release workflow builds
 Linux binaries for glibc and musl on x86_64 and arm64 plus macOS binaries, and publishes them with
 `SHA256SUMS` and `install.sh`.
 
@@ -624,6 +628,8 @@ Linux binaries for glibc and musl on x86_64 and arm64 plus macOS binaries, and p
 
 sqweezdb is experimental and pre-1.0. Expect breaking changes to the file format and the APIs before
 1.0, and keep backups of anything that matters.
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

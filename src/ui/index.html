@@ -5,145 +5,619 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sqweezdb console</title>
 <style>
-:root { --bg:#f6f7f9; --panel:#fff; --ink:#1b1f24; --muted:#6b7280; --line:#e3e6ea; --accent:#0b6e4f; --accent-ink:#fff; --bad:#b42318; --badbg:#fde8e6; --good:#0b6e4f; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; --sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --panel:#171a21; --ink:#e6e8eb; --muted:#9aa3ad; --line:#2a2f38; --accent:#3dbf8f; --accent-ink:#06130e; --bad:#ff8a80; --badbg:#3a1714; --good:#3dbf8f; } }
-* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 var(--sans) }
-header { display:flex; align-items:center; gap:16px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line) }
-header h1 { font-size:16px; margin:0; letter-spacing:.2px } header .dir { color:var(--muted); font-family:var(--mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 }
-header input { font:13px var(--mono); padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); width:220px }
-button { font:13px var(--sans); padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink); cursor:pointer } button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) } button.on { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) } button:disabled { opacity:.5; cursor:default }
-main { display:grid; grid-template-columns:280px 1fr; gap:16px; padding:16px; min-height:calc(100vh - 53px) }
-@media (max-width: 900px) { main { grid-template-columns:1fr } }
-.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px } .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin:0 0 8px }
-aside { display:flex; flex-direction:column; gap:16px } .tables li { list-style:none; padding:6px 8px; border-radius:6px; cursor:pointer; display:flex; justify-content:space-between; gap:8px } .tables li:hover { background:var(--bg) } .tables li .n { color:var(--muted); font-variant-numeric:tabular-nums } .tables ul { margin:0; padding:0 } .tables small { display:block; color:var(--muted); font-size:11px }
-.kv { display:grid; grid-template-columns:auto 1fr; gap:4px 10px; font-size:13px } .kv b { color:var(--muted); font-weight:500 } .kv span { font-family:var(--mono); font-size:12px; overflow-wrap:anywhere }
-.tabs { display:flex; gap:4px; margin-bottom:12px } .tabs button { border-color:transparent; background:transparent; color:var(--muted) } .tabs button.on { background:var(--panel); color:var(--ink); border-color:var(--line) }
-textarea { width:100%; min-height:110px; font:13px/1.5 var(--mono); padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); resize:vertical }
-.row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap } .row input { flex:1; min-width:200px; font:13px var(--mono); padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink) } .meta { color:var(--muted); font-size:12px; margin-left:auto; font-variant-numeric:tabular-nums }
-.err { background:var(--badbg); color:var(--bad); padding:8px 10px; border-radius:6px; font-family:var(--mono); font-size:12px; white-space:pre-wrap } .err b { margin-right:8px }
-.grid { overflow:auto; max-height:60vh; border:1px solid var(--line); border-radius:8px } table { border-collapse:collapse; width:100%; font-size:13px } th, td { text-align:left; padding:5px 10px; border-bottom:1px solid var(--line); white-space:nowrap; font-variant-numeric:tabular-nums } th { position:sticky; top:0; background:var(--panel); font-weight:600; font-size:12px; color:var(--muted) } td.num { text-align:right; font-family:var(--mono); font-size:12px } td.null { color:var(--muted); font-style:italic } tr:hover td { background:var(--bg) }
-.badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:600; background:var(--bg); border:1px solid var(--line) } .badge.live { color:var(--accent); border-color:var(--accent) } .badge.insert { color:var(--good) } .badge.delete { color:var(--bad) } .badge.update { color:#8a6d00 }
-.events { max-height:60vh; overflow:auto; font-family:var(--mono); font-size:12px } .events div { padding:4px 0; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:baseline } .events .k { color:var(--muted) }
-.hidden { display:none } .muted { color:var(--muted) } code { font-family:var(--mono); font-size:12px }
-/* table designer */
-.panel h2.withbtn { display:flex; align-items:center; justify-content:space-between }
-button.icon { padding:1px 8px; font-size:15px; line-height:1.3 } h2 button.icon { color:var(--accent); border-color:var(--line) }
-.tables li .tedit { padding:0 6px; font-size:12px; line-height:1.6; margin-left:auto; opacity:0; border-color:transparent; background:transparent; color:var(--muted) }
-.tables li:hover .tedit, .tables li .tedit:focus { opacity:1 } .tables li .tedit:hover { color:var(--ink); border-color:var(--line) }
-.modal { position:fixed; inset:0; background:rgba(10,12,16,.55); display:flex; align-items:flex-start; justify-content:center; padding:6vh 16px 16px; z-index:10; overflow:auto }
-.modal.hidden { display:none }
-.sheet { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(1120px,100%); padding:16px 18px; box-shadow:0 24px 64px rgba(0,0,0,.35) }
-.sheet-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px } .sheet-head h3 { margin:0; font-size:16px }
-.field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); margin-bottom:14px; max-width:360px }
-.field input, .colgrid input, .colgrid select { font:13px var(--sans); padding:5px 7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); width:100%; min-width:0 }
-.field input:disabled, .colgrid input:disabled, .colgrid select:disabled { opacity:.55 }
-.colgrid { display:grid; grid-template-columns:minmax(120px,1.5fr) 118px 74px 34px 58px 58px minmax(90px,1fr) minmax(170px,1.5fr) 32px; gap:6px 8px; align-items:center }
-.colgrid .h { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); white-space:nowrap }
-.colgrid .c { display:flex; justify-content:center } .colgrid input[type=checkbox], .colgrid input[type=radio] { width:auto; accent-color:var(--accent) }
-.colgrid .ref { display:flex; gap:4px } .colgrid .ref select:last-child { max-width:96px }
-.colgrid .gone input, .colgrid .gone select { text-decoration:line-through; opacity:.45 }
-.colgrid .tag { font-size:10px; color:var(--accent); margin-left:4px }
-pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:12px/1.55 var(--mono); white-space:pre-wrap; margin:12px 0 0; max-height:24vh; overflow:auto }
-.sheet-foot { display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap } .sheet-foot .muted { flex:1; font-size:12px; min-width:200px } .sheet-foot .bad { color:var(--bad) }
-@media (max-width: 900px) { .colgrid { grid-template-columns:1fr 1fr } .colgrid .h { display:none } }
+:root {
+  --bg:#141518; --panel:#1b1d21; --raised:#212429; --hover:#272a30; --active:#2e3138; --line:#2b2e34; --line-2:#383c43;
+  --text:#e8eaed; --text-2:#b0b5bd; --text-3:#858b94; --primary:#e8eaed; --primary-ink:#141518;
+  --ok:#5cc98f; --ok-bg:rgba(92,201,143,.12); --bad:#ff7070; --bad-bg:rgba(255,112,112,.10); --warn:#e8b55c; --warn-bg:rgba(232,181,92,.12); --info:#8fb4ff;
+  --kw:#93b8ff; --str:#a9d69a; --num:#f0c27b; --fn:#d4b0ff; --cmt:#6b717a; --param:#ffb37a;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI","Helvetica Neue",sans-serif;
+  --r:8px; --r-sm:6px;
+  color-scheme: dark;
+}
+* { box-sizing:border-box }
+html, body { height:100% }
+body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 var(--sans); -webkit-font-smoothing:antialiased }
+button, input, select, textarea { font:inherit; color:inherit }
+:focus-visible { outline:2px solid #9aa4b2; outline-offset:2px }
+.hidden { display:none !important }
+.mono { font-family:var(--mono) }
+kbd { font:11px var(--mono); padding:1px 5px; border-radius:4px; border:1px solid var(--line-2); color:var(--text-3); background:var(--bg) }
+svg.i { width:16px; height:16px; flex:none; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round }
+
+/* buttons */
+.btn { display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 12px; border-radius:var(--r-sm); border:1px solid var(--line-2); background:var(--raised); color:var(--text); cursor:pointer; white-space:nowrap; transition:background .12s, border-color .12s }
+.btn:hover { background:var(--hover); border-color:#454a52 }
+.btn:disabled { opacity:.45; cursor:default }
+.btn-primary { background:var(--primary); color:var(--primary-ink); border-color:var(--primary); font-weight:600 }
+.btn-primary:hover { background:#ffffff; border-color:#ffffff }
+.btn-primary kbd { background:transparent; border-color:rgba(20,21,24,.25); color:rgba(20,21,24,.65) }
+.btn-ghost { background:transparent; border-color:transparent; color:var(--text-2) }
+.btn-ghost:hover { background:var(--hover); border-color:transparent; color:var(--text) }
+.btn-sm { height:26px; padding:0 9px; font-size:12px }
+.btn-danger { color:var(--bad) }
+.icon-btn { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:var(--r-sm); border:0; background:transparent; color:var(--text-3); cursor:pointer }
+.icon-btn:hover { background:var(--hover); color:var(--text) }
+.btn[aria-pressed="true"].live-btn { background:var(--ok-bg); border-color:rgba(92,201,143,.45); color:var(--ok) }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--text-3); flex:none }
+.live-btn[aria-pressed="true"] .dot, .pill.ok .dot { background:var(--ok); box-shadow:0 0 0 0 rgba(92,201,143,.6); animation:pulse 1.6s infinite }
+@keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(92,201,143,.55) } 70% { box-shadow:0 0 0 6px rgba(92,201,143,0) } 100% { box-shadow:0 0 0 0 rgba(92,201,143,0) } }
+@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important } }
+
+/* inputs */
+.input { height:30px; padding:0 10px; border-radius:var(--r-sm); border:1px solid var(--line-2); background:var(--bg); color:var(--text); min-width:0 }
+.input:focus { border-color:#5b616b; outline:none; box-shadow:0 0 0 3px rgba(154,164,178,.18) }
+.input::placeholder, textarea::placeholder { color:var(--text-3) }
+
+/* layout */
+.app { display:grid; grid-template-columns:272px minmax(0,1fr); height:100vh }
+.side { display:flex; flex-direction:column; min-height:0; background:var(--panel); border-right:1px solid var(--line) }
+.main { display:flex; flex-direction:column; min-width:0; min-height:0 }
+
+/* sidebar */
+.brand { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 14px 4px }
+.wordmark { font-weight:800; font-size:16px; letter-spacing:-.02em }
+.wordmark span { color:var(--text-3); font-weight:600 }
+.pill { display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 9px; border-radius:999px; font-size:11px; font-weight:600; border:1px solid var(--line-2); color:var(--text-2) }
+.pill.ok { color:var(--ok); border-color:rgba(92,201,143,.35); background:var(--ok-bg) }
+.pill.bad { color:var(--bad); border-color:rgba(255,112,112,.35); background:var(--bad-bg) }
+.pill.bad .dot { background:var(--bad) } .pill.warn { color:var(--warn); border-color:rgba(232,181,92,.35); background:var(--warn-bg) } .pill.warn .dot { background:var(--warn) }
+.dbname { display:flex; flex-direction:column; gap:1px; padding:2px 14px 12px; min-width:0 }
+.dbname b { font-weight:600; font-size:13px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.dbname span { font:11px var(--mono); color:var(--text-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.sec-head { display:flex; align-items:center; gap:8px; padding:12px 14px 6px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--text-3) }
+.sec-head .count { font-weight:500; letter-spacing:0; text-transform:none; color:var(--text-3); background:var(--raised); border-radius:999px; padding:0 7px; font-size:11px }
+.sec-head .icon-btn { margin-left:auto }
+.search { position:relative; margin:2px 10px 6px; display:block }
+.search svg.i { position:absolute; left:9px; top:7px; width:15px; height:15px; color:var(--text-3) }
+.search .input { width:100%; padding-left:30px; padding-right:28px; height:30px; background:var(--bg) }
+.search kbd { position:absolute; right:7px; top:6px }
+.tables-wrap { flex:1; min-height:0; overflow:auto; padding:0 6px 8px }
+.tlist { list-style:none; margin:0; padding:0 }
+.trow { display:flex; align-items:center; gap:6px; height:30px; padding:0 6px 0 4px; border-radius:var(--r-sm); cursor:pointer; color:var(--text-2) }
+.trow:hover { background:var(--hover); color:var(--text) }
+.trow.sel { background:var(--active); color:var(--text) }
+.trow .chev { width:18px; height:18px; display:grid; place-items:center; border:0; background:transparent; color:var(--text-3); border-radius:4px; cursor:pointer; padding:0 }
+.trow .chev:hover { color:var(--text); background:var(--line-2) }
+.trow .chev svg { width:12px; height:12px; transition:transform .12s }
+.trow.open .chev svg { transform:rotate(90deg) }
+.trow .tname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500 }
+.trow .rows { font:11px var(--mono); color:var(--text-3); font-variant-numeric:tabular-nums }
+.trow .tedit { opacity:0; width:22px; height:22px }
+.trow:hover .tedit, .trow .tedit:focus-visible { opacity:1 }
+.cols { list-style:none; margin:0 0 4px; padding:0 0 0 30px }
+.cols li { display:flex; align-items:center; gap:6px; height:24px; padding-right:8px; font-size:12px; color:var(--text-2) }
+.cols li .cn { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.cols li .ct { font:11px var(--mono); color:var(--text-3) }
+.cols li svg.i { width:12px; height:12px; color:var(--text-3) }
+.cols li svg.key { color:var(--warn) }
+.tempty { padding:14px 12px; color:var(--text-3); font-size:12px }
+.tempty button { margin-top:8px }
+.side-foot { border-top:1px solid var(--line); padding-bottom:12px }
+.stat { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0; padding:2px 14px 10px; font-size:12px }
+.stat dt { color:var(--text-3) }
+.stat dd { margin:0; text-align:right; font:12px var(--mono); color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums }
+.side-foot .btn { margin:0 14px; width:calc(100% - 28px); justify-content:center }
+
+/* top bar + tabs */
+.topbar { display:flex; align-items:center; gap:12px; height:48px; padding:0 16px; border-bottom:1px solid var(--line); background:var(--panel) }
+.tabs { display:flex; gap:2px; height:100% }
+.tab { position:relative; display:inline-flex; align-items:center; gap:7px; padding:0 12px; border:0; background:transparent; color:var(--text-3); cursor:pointer; font-weight:500 }
+.tab:hover { color:var(--text) }
+.tab[aria-selected="true"] { color:var(--text) }
+.tab[aria-selected="true"]::after { content:""; position:absolute; left:10px; right:10px; bottom:-1px; height:2px; border-radius:2px; background:var(--text) }
+.tab .badge { font-size:10px; padding:0 6px; border-radius:999px; background:var(--ok-bg); color:var(--ok) }
+.top-right { margin-left:auto; display:flex; align-items:center; gap:8px; min-width:0 }
+
+/* views */
+.view { flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto }
+
+/* editor */
+.card { background:var(--panel); border:1px solid var(--line); border-radius:var(--r) }
+.editor-card { flex:none }
+.editor { display:flex; max-height:38vh; min-height:126px; overflow:auto; border-radius:var(--r) var(--r) 0 0; background:var(--panel) }
+.gutter { position:sticky; left:0; z-index:1; flex:none; white-space:pre; padding:12px 10px 12px 12px; text-align:right; font:13px/1.6 var(--mono); color:#555b63; background:var(--panel); user-select:none; min-width:42px; border-right:1px solid var(--line) }
+.code { position:relative; flex:1 0 auto; min-width:calc(100% - 42px) }
+.code pre, .code textarea { margin:0; padding:12px 14px; font:13px/1.6 var(--mono); white-space:pre; tab-size:2; border:0 }
+.code pre { color:var(--text); min-height:100%; pointer-events:none }
+.code textarea { position:absolute; inset:0; width:100%; height:100%; resize:none; overflow:hidden; background:transparent; color:transparent; -webkit-text-fill-color:transparent; caret-color:var(--text); outline:none }
+.code textarea::selection { background:rgba(143,180,255,.28); -webkit-text-fill-color:transparent }
+.tk-kw { color:var(--kw) } .tk-str { color:var(--str) } .tk-num { color:var(--num) } .tk-fn { color:var(--fn) } .tk-cmt { color:var(--cmt); font-style:italic } .tk-param { color:var(--param) } .tk-ph { color:var(--text-3) }
+.toolbar { display:flex; align-items:center; gap:8px; padding:8px 10px; border-top:1px solid var(--line); flex-wrap:wrap }
+.toolbar .spacer { flex:1 }
+.meta { display:flex; align-items:center; gap:10px; color:var(--text-3); font-size:12px; font-variant-numeric:tabular-nums; flex-wrap:wrap }
+.meta b { color:var(--text-2); font-weight:600 }
+.meta .sep { width:3px; height:3px; border-radius:50%; background:var(--line-2) }
+.live-tag { display:inline-flex; align-items:center; gap:6px; color:var(--ok); font-weight:600; font-size:11px; letter-spacing:.06em }
+.params { display:flex; align-items:center; gap:10px; padding:0 10px 10px }
+.params label { color:var(--text-3); font-size:12px; white-space:nowrap }
+.params .input { flex:1; font-family:var(--mono); font-size:12px }
+
+/* alerts */
+.alert { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border-radius:var(--r); border:1px solid rgba(255,112,112,.3); background:var(--bad-bg); color:#ffd0d0 }
+.alert .ecode { flex:none; font:11px var(--mono); font-weight:700; color:var(--bad); padding:1px 6px; border-radius:4px; border:1px solid rgba(255,112,112,.4); margin-top:1px }
+.alert .msg { white-space:pre-wrap; word-break:break-word; font-family:var(--mono); font-size:12px; line-height:1.55 }
+.alert .x { margin-left:auto; color:#ffb3b3 }
+
+/* results */
+.results { flex:1; min-height:160px; display:flex; flex-direction:column; overflow:hidden }
+.grid { flex:1; overflow:auto }
+table.data { border-collapse:separate; border-spacing:0; width:100%; font-size:12.5px; font-variant-numeric:tabular-nums }
+table.data th { position:sticky; top:0; z-index:1; background:var(--raised); text-align:left; font-weight:600; padding:7px 12px 6px; border-bottom:1px solid var(--line-2); white-space:nowrap; color:var(--text) }
+table.data th.num { text-align:right }
+table.data .fill { width:100%; padding:0 }
+table.data td.fill { cursor:default }
+table.data td.none { padding:28px 16px; text-align:center; color:var(--text-3); cursor:default; position:sticky; left:0 }
+table.data th small { display:block; font:10.5px var(--mono); font-weight:400; color:var(--text-3); margin-top:1px }
+table.data th.rn, table.data td.rn { position:sticky; left:0; z-index:2; width:1%; text-align:right; color:#5c626a; font:11px var(--mono); background:var(--raised); padding-left:10px; padding-right:10px; border-right:1px solid var(--line) }
+table.data td.rn { z-index:0; background:var(--panel) }
+table.data td { padding:6px 12px; border-bottom:1px solid var(--line); white-space:nowrap; max-width:380px; overflow:hidden; text-overflow:ellipsis; color:var(--text-2); cursor:copy }
+table.data tbody tr:hover td { background:var(--hover); color:var(--text) }
+table.data tbody tr:hover td.rn { background:var(--hover) }
+table.data td.num { text-align:right; font-family:var(--mono); font-size:12px; color:var(--text) }
+table.data td.mono { font-family:var(--mono); font-size:12px }
+table.data td .null { font:11px var(--mono); color:#5c626a; letter-spacing:.04em }
+table.data td .t { color:var(--ok) } table.data td .f { color:var(--text-3) }
+table.data tr.flash td { animation:flash 1.4s ease-out }
+@keyframes flash { 0% { background:rgba(92,201,143,.22) } 100% { background:transparent } }
+.ok-line { padding:18px 16px; color:var(--text-2); display:flex; align-items:center; gap:8px }
+.ok-line svg.i { color:var(--ok) }
+
+/* empty states */
+.empty { flex:1; display:grid; place-items:center; padding:40px 16px; text-align:center; color:var(--text-3) }
+.empty .box { max-width:520px }
+.empty h3 { margin:12px 0 6px; color:var(--text); font-size:15px; font-weight:600 }
+.empty p { margin:0 0 16px; line-height:1.6 }
+.empty .glyph { width:44px; height:44px; margin:0 auto; display:grid; place-items:center; border-radius:12px; background:var(--raised); border:1px solid var(--line-2); color:var(--text-2) }
+.empty .glyph svg.i { width:22px; height:22px }
+.chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center }
+.chip { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 11px; border-radius:999px; border:1px solid var(--line-2); background:var(--panel); color:var(--text-2); cursor:pointer; font:12px var(--mono) }
+.chip:hover { background:var(--hover); color:var(--text) }
+.shortcuts { display:flex; gap:16px; justify-content:center; margin-top:18px; font-size:12px; flex-wrap:wrap }
+.shortcuts span { display:inline-flex; align-items:center; gap:6px }
+
+/* popover (history) */
+.pop { position:absolute; z-index:20; width:min(560px, calc(100vw - 32px)); max-height:360px; overflow:auto; padding:6px; background:var(--raised); border:1px solid var(--line-2); border-radius:var(--r); box-shadow:0 18px 50px rgba(0,0,0,.45) }
+.pop .item { display:flex; gap:12px; align-items:baseline; width:100%; padding:7px 9px; border-radius:var(--r-sm); border:0; background:transparent; text-align:left; cursor:pointer; color:var(--text-2) }
+.pop .item:hover, .pop .item:focus-visible { background:var(--hover); color:var(--text) }
+.pop .item code { flex:1; min-width:0; font:12px var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.pop .item small { color:var(--text-3); font-size:11px; white-space:nowrap }
+.pop .none { padding:12px; color:var(--text-3) }
+
+/* changes feed */
+.feedbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+.feedbar .input { flex:1; min-width:260px; font-family:var(--mono); font-size:12px }
+.feed { flex:1; min-height:200px; overflow:auto }
+.ev { display:grid; grid-template-columns:72px 64px minmax(120px,260px) 1fr auto; gap:12px; align-items:center; padding:7px 14px; border-bottom:1px solid var(--line); font-size:12px }
+.ev:first-child { animation:flash 1.4s ease-out }
+.ev .time, .ev .seq { font:11px var(--mono); color:var(--text-3) }
+.ev .tb { color:var(--text); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.ev .tb .key { font:12px var(--mono); font-weight:400; color:var(--text-3); margin-left:8px }
+.ev .vals { font:12px var(--mono); color:var(--text-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.ev .vals b { color:var(--text-2); font-weight:400 }
+.op { display:inline-flex; justify-content:center; font:10.5px var(--mono); font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:2px 0; border-radius:4px; width:60px }
+.op.insert { color:var(--ok); background:var(--ok-bg) } .op.update { color:var(--warn); background:var(--warn-bg) } .op.delete { color:var(--bad); background:var(--bad-bg) }
+.feed-status { color:var(--text-3); font-size:12px; display:flex; gap:10px; align-items:center }
+
+/* access */
+.acl-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:12px; align-items:start }
+.acl-grid .w4 { grid-column:span 4 } .acl-grid .w2 { grid-column:span 2 } .acl-grid .w1 { grid-column:span 1 }
+@media (max-width: 1100px) { .acl-grid .w2, .acl-grid .w1 { grid-column:span 4 } }
+.acl-card { display:flex; flex-direction:column; min-height:0 }
+.acl-card header { display:flex; align-items:center; gap:8px; padding:12px 14px 10px; font-weight:600 }
+.acl-card header .count { font-size:11px; font-weight:500; color:var(--text-3); background:var(--raised); border-radius:999px; padding:0 7px }
+.acl-card .grid { max-height:280px; border-top:1px solid var(--line) }
+.acl-card table.data td { cursor:auto }
+.acl-card .none { padding:14px; color:var(--text-3); font-size:12px; border-top:1px solid var(--line) }
+.examples { padding:14px }
+.examples h4 { margin:0 0 4px; font-size:13px }
+.examples p { margin:0 0 12px; color:var(--text-3) }
+.ex { display:flex; gap:10px; align-items:center; padding:8px 10px; border-radius:var(--r-sm); background:var(--bg); border:1px solid var(--line); margin-bottom:6px }
+.ex code { flex:1; min-width:0; font:12px var(--mono); color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+
+/* backup */
+.tdot { width:7px; height:7px; border-radius:50%; background:#4a4f57 } .tdot.ok { background:var(--ok) } .tdot.warn { background:var(--warn) } .tdot.bad { background:var(--bad) }
+.bk { display:flex; flex-direction:column; gap:12px; max-width:1180px; width:100% }
+.bk .card h3 { display:flex; align-items:center; gap:8px; margin:0; padding:16px 20px 8px; font-size:13px; font-weight:600 }
+.bk .card h3 .dim { font-weight:400 }
+.bk .sub { margin:0; padding:0 20px 12px; color:var(--text-3) }
+.dim { color:var(--text-3) }
+.bk-head { padding:18px 20px }
+.bk-head .big { display:flex; align-items:center; gap:12px; font-size:15px; font-weight:600; flex-wrap:wrap }
+.bk-head p { margin:10px 0 0; color:var(--text-2); line-height:1.6; max-width:820px }
+.bk-head .warnline { display:flex; gap:8px; align-items:center; color:var(--warn) }
+.state { display:inline-flex; align-items:center; gap:7px; height:26px; padding:0 11px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--line-2); color:var(--text-2) }
+.state.ok { color:var(--ok); background:var(--ok-bg); border-color:rgba(92,201,143,.35) } .state.ok .dot { background:var(--ok) }
+.state.warn { color:var(--warn); background:var(--warn-bg); border-color:rgba(232,181,92,.35) } .state.warn .dot { background:var(--warn) }
+.state.bad { color:var(--bad); background:var(--bad-bg); border-color:rgba(255,112,112,.35) } .state.bad .dot { background:var(--bad) }
+.tiles { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:12px }
+.tile { padding:14px 16px }
+.tile .k { color:var(--text-3); font-size:12px }
+.tile .v { margin-top:4px; font-size:20px; font-weight:650; letter-spacing:-.01em; font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.tile .s { margin-top:2px; color:var(--text-3); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.kvgrid { display:grid; grid-template-columns:200px minmax(0, 1fr); gap:9px 16px; margin:0; padding:6px 20px 18px }
+.kvgrid dt { color:var(--text-3) } .kvgrid dd { margin:0; color:var(--text-2); font-family:var(--mono); font-size:12px; overflow-wrap:anywhere }
+.bk-err { border-color:rgba(255,112,112,.3) } .bk-err h3 svg.i { color:var(--bad) }
+.bk-err.past { border-color:var(--line) } .bk-err.past h3 svg.i { color:var(--text-3) } .bk-err.past pre { background:var(--bg); color:var(--text-3) }
+.bk-err pre { margin:0 20px 18px; padding:10px 12px; border-radius:var(--r-sm); background:var(--bad-bg); color:#ffd0d0; font:12px/1.55 var(--mono); white-space:pre-wrap; word-break:break-word }
+.testhead { display:flex; align-items:center; gap:12px; padding-right:16px } .testhead h3 { flex:1 }
+.steps { padding:0 20px 16px }
+.step { display:grid; grid-template-columns:20px 220px auto 1fr; align-items:center; gap:8px; padding:5px 0; color:var(--text-2) }
+.step.ok svg.i { color:var(--ok) } .step.bad svg.i { color:var(--bad) }
+.step .ms { font:12px var(--mono); color:var(--text-3) }
+.step .e { grid-column:2 / -1; font:12px/1.5 var(--mono); color:#ffb3b3; white-space:pre-wrap; word-break:break-word }
+.sumline { margin-top:8px; font-weight:600 } .sumline.ok { color:var(--ok) } .sumline.bad { color:var(--bad) }
+.bk-form { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px 16px; padding:4px 20px 4px }
+.bk-form label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--text-2) }
+.bk-form .input { height:32px; font-family:var(--mono); font-size:12.5px }
+.bk-checks { display:flex; flex-direction:column; gap:10px; padding:14px 20px 6px }
+.bk-checks label { display:flex; gap:9px; align-items:center; color:var(--text-2); cursor:pointer }
+.bk-checks input { width:15px; height:15px; accent-color:var(--primary) }
+.codeblock { position:relative; margin:0 20px 18px }
+.codeblock pre { margin:0; padding:12px 84px 12px 14px; background:var(--bg); border:1px solid var(--line); border-radius:var(--r); font:12.5px/1.6 var(--mono); white-space:pre; overflow-x:auto }
+.codeblock .btn { position:absolute; top:8px; right:8px }
+.stat dd.ok { color:var(--ok) } .stat dd.warn { color:var(--warn) } .stat dd.bad { color:var(--bad) }
+@media (max-width: 1100px) { .tiles { grid-template-columns:repeat(2, minmax(0, 1fr)) } .bk-form { grid-template-columns:1fr } .kvgrid { grid-template-columns:1fr } .step { grid-template-columns:20px 1fr auto } }
+
+/* gate */
+.gate { position:fixed; inset:0; z-index:40; display:grid; place-items:center; padding:16px; background:radial-gradient(1200px 600px at 50% -10%, #23262c 0%, var(--bg) 60%) }
+.gate .box { width:min(400px,100%); padding:28px; background:var(--panel); border:1px solid var(--line-2); border-radius:12px; box-shadow:0 30px 80px rgba(0,0,0,.5) }
+.gate h2 { margin:14px 0 4px; font-size:18px }
+.gate p { margin:0 0 18px; color:var(--text-3); line-height:1.55 }
+.gate label { display:block; font-size:12px; color:var(--text-2); margin-bottom:6px }
+.gate .input { width:100%; height:36px; font-family:var(--mono) }
+.gate .btn { width:100%; height:36px; justify-content:center; margin-top:12px }
+.gate .gerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:18px }
+.gate code { font:12px var(--mono); color:var(--text-2) }
+
+/* modal (table designer) */
+.modal { position:fixed; inset:0; z-index:30; display:flex; align-items:flex-start; justify-content:center; padding:7vh 16px 16px; background:rgba(8,9,11,.66); overflow:auto }
+.sheet { width:min(1140px,100%); background:var(--panel); border:1px solid var(--line-2); border-radius:12px; box-shadow:0 30px 90px rgba(0,0,0,.55) }
+.sheet-head { display:flex; align-items:center; gap:12px; padding:16px 18px; border-bottom:1px solid var(--line) }
+.sheet-head h3 { margin:0; font-size:15px }
+.sheet-head .icon-btn { margin-left:auto }
+.sheet-body { padding:16px 18px }
+.field { display:flex; flex-direction:column; gap:6px; max-width:340px; margin-bottom:16px; font-size:12px; color:var(--text-2) }
+.field .input { height:32px }
+.colgrid { display:grid; grid-template-columns:minmax(130px,1.4fr) 118px 78px 40px 64px 58px minmax(110px,1fr) minmax(190px,1.5fr) 30px; gap:6px 8px; align-items:center }
+.colgrid .h { font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--text-3); white-space:nowrap; padding-bottom:2px }
+.colgrid .input, .colgrid select { height:30px; width:100%; min-width:0; font-size:12.5px }
+.colgrid select { padding:0 6px; border-radius:var(--r-sm); border:1px solid var(--line-2); background:var(--bg) }
+.colgrid input:disabled, .colgrid select:disabled, .field .input:disabled { opacity:.5 }
+.colgrid .c { display:flex; justify-content:center }
+.colgrid input[type=checkbox], .colgrid input[type=radio] { width:15px; height:15px; accent-color:var(--primary) }
+.colgrid .ref { display:flex; gap:4px }
+.colgrid .ref select:last-child { max-width:98px }
+.colgrid .gone .input, .colgrid .gone select { text-decoration:line-through; opacity:.4 }
+.colgrid .tag { font-size:10px; font-weight:700; color:var(--ok); margin-left:6px; letter-spacing:.05em; text-transform:uppercase }
+.colgrid .autolbl { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--text-2) }
+.addcol { margin-top:10px }
+pre.sql { margin:16px 0 0; padding:12px 14px; max-height:24vh; overflow:auto; background:var(--bg); border:1px solid var(--line); border-radius:var(--r); font:12.5px/1.6 var(--mono); white-space:pre-wrap }
+.sheet-foot { display:flex; align-items:center; gap:8px; padding:14px 18px; border-top:1px solid var(--line); flex-wrap:wrap }
+.sheet-foot .hint { flex:1; min-width:220px; color:var(--text-3); font-size:12px }
+.sheet-foot .hint.bad { color:var(--bad) }
+.sheet .alert { margin-top:12px }
+
+/* toasts */
+.toasts { position:fixed; right:16px; bottom:16px; z-index:50; display:flex; flex-direction:column; gap:8px; align-items:flex-end; pointer-events:none }
+.toast { display:flex; align-items:center; gap:8px; max-width:420px; padding:9px 12px; border-radius:var(--r); background:var(--raised); border:1px solid var(--line-2); box-shadow:0 12px 30px rgba(0,0,0,.4); color:var(--text); font-size:12.5px; animation:toastin .18s ease-out }
+.toast svg.i { color:var(--ok) } .toast.bad svg.i { color:var(--bad) }
+@keyframes toastin { from { transform:translateY(6px); opacity:0 } to { transform:none; opacity:1 } }
+
+@media (max-width: 860px) {
+  .app { grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); height:auto; min-height:100vh }
+  .side { border-right:0; border-bottom:1px solid var(--line); max-height:none }
+  .tables-wrap { max-height:240px }
+  .top-right .path { display:none }
+  .colgrid { grid-template-columns:1fr 1fr } .colgrid .h { display:none }
+  .ev { grid-template-columns:64px 1fr; } .ev .vals, .ev .seq { grid-column:1 / -1 }
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>sqweezdb</h1>
-  <div class="dir" id="dir">connecting…</div>
-  <input id="token" type="password" placeholder="token" autocomplete="off">
-  <button id="connect" class="primary">Connect</button>
-</header>
-<main>
-  <aside>
-    <section class="panel tables"><h2 class="withbtn">Tables <button id="newtable" class="icon" title="New table" aria-label="New table">+</button></h2><ul id="tables"><li class="muted">—</li></ul></section>
-    <section class="panel"><h2>Status</h2><div class="kv" id="status"></div><div class="row"><button id="snap">Snapshot now</button><span class="meta" id="snapmeta"></span></div></section>
+<div class="app" id="app">
+  <aside class="side" aria-label="Database">
+    <div class="brand"><div class="wordmark">sqweez<span>db</span></div><span id="conn" class="pill"><span class="dot"></span><span id="conntext">connecting</span></span></div>
+    <div class="dbname" id="dbname" title=""><b id="dbbase">&#8203;</b><span id="dbpath"></span></div>
+    <div class="sec-head"><span>Tables</span><span class="count" id="tcount">0</span><button id="newtable" class="icon-btn" title="New table" aria-label="New table"></button></div>
+    <label class="search"><span id="searchicon"></span><input id="tfilter" class="input" placeholder="Filter tables" aria-label="Filter tables" autocomplete="off" spellcheck="false"><kbd>/</kbd></label>
+    <div class="tables-wrap"><ul class="tlist" id="tables"></ul></div>
+    <div class="side-foot">
+      <div class="sec-head"><span>Status</span></div>
+      <dl class="stat" id="status"></dl>
+      <button id="snap" class="btn btn-sm">Snapshot now</button>
+    </div>
   </aside>
-  <section>
-    <div class="tabs"><button class="on" data-tab="console">Console</button><button data-tab="changes">Changes</button><button data-tab="acl">Access</button></div>
-    <div id="tab-console" class="panel">
-      <textarea id="sql" spellcheck="false" placeholder="SELECT … (Ctrl+Enter runs)">SELECT count(*) AS rows FROM </textarea>
-      <div class="row"><input id="params" placeholder='parameters as a JSON array, e.g. [42, "alice"]'><button id="run" class="primary">Run</button><button id="live">Live</button><span class="meta" id="meta"></span></div>
-      <div id="err" class="err hidden"></div>
-      <div class="grid"><table id="result"></table></div>
-    </div>
-    <div id="tab-changes" class="panel hidden">
-      <div class="row"><input id="csql" placeholder="SELECT * FROM orders WHERE user_id = 42   (a single-table SELECT: its WHERE is the filter)"><button id="cstart" class="primary">Start</button><span class="meta" id="cmeta"></span></div>
-      <div class="events" id="events"></div>
-    </div>
-    <div id="tab-acl" class="panel hidden">
-      <div class="row"><span class="muted">Roles, users, grants and row policies. Manage them with <code>CREATE ROLE</code>, <code>CREATE USER … IN ROLE … WITH attr = value</code>, <code>GRANT … ON table TO role</code>, <code>CREATE POLICY … USING (col = SESSION.attr)</code> in the console.</span><button id="aclrefresh">Refresh</button></div>
-      <div id="acl"></div>
-    </div>
-  </section>
-</main>
-<div id="designer" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="dtitle">
-  <div class="sheet">
-    <div class="sheet-head"><h3 id="dtitle">New table</h3><button id="dclose" class="icon" aria-label="Close">×</button></div>
-    <label class="field">Table name<input id="dname" autocomplete="off" spellcheck="false" placeholder="orders"></label>
-    <div class="colgrid" id="dcols"></div>
-    <div class="row"><button id="daddcol">+ Add column</button></div>
-    <pre class="sql" id="dsql"></pre>
-    <div id="derr" class="err hidden" style="margin-top:10px"></div>
-    <div class="sheet-foot"><span class="muted" id="dhint"></span><button id="dcancel">Cancel</button><button id="dapply" class="primary">Create table</button></div>
+  <div class="main">
+    <header class="topbar">
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button class="tab" role="tab" aria-selected="true" data-tab="console" id="t-console">Query</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="changes" id="t-changes">Changes <span class="badge hidden" id="feedbadge">live</span></button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="acl" id="t-acl">Access</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="backup" id="t-backup">Backup <span class="tdot" id="bkdot" aria-hidden="true"></span></button>
+      </nav>
+      <div class="top-right"><button id="disconnect" class="btn btn-ghost btn-sm">Disconnect</button></div>
+    </header>
+
+    <section id="tab-console" class="view" role="tabpanel" aria-labelledby="t-console">
+      <div class="card editor-card">
+        <div class="editor" id="editor">
+          <div class="gutter" id="gutter" aria-hidden="true">1</div>
+          <div class="code"><pre id="hl" aria-hidden="true"></pre><textarea id="sql" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="SQL" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"></textarea></div>
+        </div>
+        <div class="toolbar">
+          <button id="run" class="btn btn-primary">Run <kbd id="runkbd">Ctrl ↵</kbd></button>
+          <button id="live" class="btn live-btn" aria-pressed="false" title="Keep the result of a SELECT up to date as rows change"><span class="dot"></span>Live</button>
+          <button id="paramsbtn" class="btn btn-ghost" aria-expanded="false">Parameters</button>
+          <button id="histbtn" class="btn btn-ghost" aria-haspopup="true" aria-expanded="false">History</button>
+          <span class="spacer"></span>
+          <div class="meta" id="meta"></div>
+        </div>
+        <div class="params hidden" id="paramsrow"><label for="params">Parameters for <span class="mono">?</span></label><input id="params" class="input" placeholder='a JSON array, for example [42, "alice"]' spellcheck="false" autocomplete="off"></div>
+      </div>
+      <div id="err" class="alert hidden" role="alert"></div>
+      <div class="card results hidden" id="results"><div class="grid" id="grid"><table class="data" id="result"></table></div></div>
+      <div class="empty" id="empty"></div>
+    </section>
+
+    <section id="tab-changes" class="view hidden" role="tabpanel" aria-labelledby="t-changes">
+      <div class="feedbar">
+        <input id="csql" class="input" placeholder="SELECT * FROM orders WHERE user_id = 42" spellcheck="false" autocomplete="off" aria-label="Which changes to follow">
+        <button id="cstart" class="btn btn-primary">Follow</button>
+        <button id="cclear" class="btn btn-ghost">Clear</button>
+      </div>
+      <div class="feed-status" id="cmeta">A single-table SELECT picks what to follow: its WHERE is the filter. New changes appear at the top as they commit.</div>
+      <div class="card feed" id="feed"><div class="empty" id="fempty"></div><div id="events"></div></div>
+    </section>
+
+    <section id="tab-acl" class="view hidden" role="tabpanel" aria-labelledby="t-acl">
+      <div class="acl-grid" id="acl"></div>
+    </section>
+
+    <section id="tab-backup" class="view hidden" role="tabpanel" aria-labelledby="t-backup">
+      <div class="bk" id="bk"></div>
+    </section>
   </div>
 </div>
+
+<div id="gate" class="gate hidden" role="dialog" aria-modal="true" aria-labelledby="gtitle">
+  <form class="box" id="gateform">
+    <div class="wordmark">sqweez<span>db</span></div>
+    <h2 id="gtitle">Connect to the console</h2>
+    <p>Paste the token this server printed when it started, or the one you passed with <code>--token</code>.</p>
+    <label for="token">Token</label>
+    <input id="token" class="input" type="password" autocomplete="off" spellcheck="false">
+    <button class="btn btn-primary" id="connect" type="submit">Connect</button>
+    <div class="gerr" id="gerr" role="alert"></div>
+  </form>
+</div>
+
+<div id="designer" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="dtitle">
+  <div class="sheet">
+    <div class="sheet-head"><h3 id="dtitle">New table</h3><button id="dclose" class="icon-btn" aria-label="Close"></button></div>
+    <div class="sheet-body">
+      <label class="field">Table name<input id="dname" class="input" autocomplete="off" spellcheck="false" placeholder="orders"></label>
+      <div class="colgrid" id="dcols"></div>
+      <button id="daddcol" class="btn btn-ghost btn-sm addcol">Add column</button>
+      <pre class="sql" id="dsql"></pre>
+      <div id="derr" class="alert hidden" role="alert"></div>
+    </div>
+    <div class="sheet-foot"><span class="hint" id="dhint"></span><button id="dcancel" class="btn">Cancel</button><button id="dapply" class="btn btn-primary">Create table</button></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const ICON = {
+    plus: '<path d="M12 5v14M5 12h14"/>', search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>', chev: '<path d="M9 6l6 6-6 6"/>',
+    edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/>', key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>',
+    link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    x: '<path d="M6 6l12 12M18 6L6 18"/>', check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>', alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/>',
+    play: '<path d="M7 5l12 7-12 7z"/>', table: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M9 9.5v10"/>',
+    pulse: '<path d="M3 12h4l3-7 4 14 3-7h4"/>', shield: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/>', terminal: '<path d="M5 7l5 5-5 5M12 17h7"/>',
+  };
+  const icon = (name, cls) => `<svg class="i${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
+  $('newtable').innerHTML = icon('plus'); $('searchicon').innerHTML = icon('search'); $('dclose').innerHTML = icon('x');
+  $('daddcol').innerHTML = icon('plus') + 'Add column';
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const MOD = isMac ? '⌘' : 'Ctrl';
+  $('runkbd').textContent = `${MOD} ↵`;
+  const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} } };
   let token = ''; try { token = sessionStorage.getItem('sqweezdb.token') || ''; } catch (_) {}
-  $('token').value = token;
-  const fmtBytes = (n) => n == null ? '—' : n < 1e6 ? (n / 1e3).toFixed(0) + ' KB' : n < 1e9 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e9).toFixed(2) + ' GB';
+  const fmtBytes = (n) => n == null ? '—' : n < 1e3 ? n + ' B' : n < 1e6 ? (n / 1e3).toFixed(0) + ' KB' : n < 1e9 ? (n / 1e6).toFixed(1) + ' MB' : (n / 1e9).toFixed(2) + ' GB';
+  const fmtN = (n) => Number(n).toLocaleString();
+
+  // ---- toasts
+  function toast(msg, bad) {
+    const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.innerHTML = icon(bad ? 'alert' : 'check') + `<span>${esc(msg)}</span>`;
+    $('toasts').append(t); setTimeout(() => t.remove(), 2600);
+  }
+
+  // ---- connection
+  let connState = '';
+  function setConn(state, text) {
+    if (state === connState && $('conntext').textContent === text) return; connState = state;
+    $('conn').className = 'pill' + (state === 'ok' ? ' ok' : state === 'bad' ? ' bad' : state === 'warn' ? ' warn' : ''); $('conntext').textContent = text;
+  }
+  function showGate(msg) { $('gate').classList.remove('hidden'); $('gerr').textContent = msg || ''; $('token').value = token; setTimeout(() => $('token').focus(), 0); }
   async function api(path, opts = {}) {
     const headers = Object.assign({ Authorization: 'Bearer ' + token }, opts.body ? { 'Content-Type': 'application/json' } : {});
-    const r = await fetch(path, Object.assign({}, opts, { headers }));
+    let r; try { r = await fetch(path, Object.assign({}, opts, { headers })); } catch (_) { setConn('bad', 'offline'); throw Object.assign(new Error('the server is not answering'), { code: 'OFFLINE' }); }
     const body = await r.json().catch(() => ({ error: 'bad response', code: 'ERROR' }));
-    if (r.status === 401) { $('token').focus(); $('dir').textContent = 'token required'; }
+    if (r.status === 401) { setConn('warn', 'locked'); showGate(token ? 'That token was not accepted.' : ''); throw Object.assign(new Error('token required'), { code: 'DENIED', auth: true }); }
     if (!r.ok) throw Object.assign(new Error(body.error || r.statusText), { code: body.code || 'ERROR' });
     return body;
   }
+  $('gateform').addEventListener('submit', async (e) => {
+    e.preventDefault(); token = $('token').value.trim(); try { sessionStorage.setItem('sqweezdb.token', token); } catch (_) {}
+    $('gerr').textContent = '';
+    try { await api('/api/status'); $('gate').classList.add('hidden'); tablesKey = ''; await refresh(); toast('Connected'); } catch (err) { if (!err.auth) $('gerr').textContent = err.message; }
+  });
+  $('disconnect').onclick = () => { token = ''; try { sessionStorage.removeItem('sqweezdb.token'); } catch (_) {} stopLive(); stopFeed(); setConn('warn', 'locked'); showGate(''); };
+
+  // ---- SQL highlighting (display only; the textarea above it holds the text)
+  const KW = new Set('select from where and or not in is null as on join left inner outer cross using group by order asc desc limit offset insert into values update set delete create table alter add drop column rename to type data primary key unique references foreign cascade restrict default index if exists begin commit rollback transaction returning distinct having between like with case when then else end true false role user grant revoke policy for all session serial autoincrement generated always identity varchar text int integer bigint double real float bool boolean bytes blob timestamp uuid count sum avg min max'.split(' '));
+  function highlight(src) {
+    let out = ''; let i = 0; const n = src.length;
+    while (i < n) {
+      const c = src[i];
+      if (c === '-' && src[i + 1] === '-') { let j = src.indexOf('\n', i); if (j < 0) j = n; out += `<span class="tk-cmt">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+      if (c === "'") { let j = i + 1; while (j < n) { if (src[j] === "'") { if (src[j + 1] === "'") { j += 2; continue; } j++; break; } j++; } out += `<span class="tk-str">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+      if (c === '"') { let j = src.indexOf('"', i + 1); j = j < 0 ? n : j + 1; out += esc(src.slice(i, j)); i = j; continue; }
+      if (/[0-9]/.test(c) && !/[A-Za-z_]/.test(src[i - 1] || '')) { let j = i; while (j < n && /[0-9.]/.test(src[j])) j++; out += `<span class="tk-num">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+      if (/[A-Za-z_]/.test(c)) { let j = i; while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++; const w = src.slice(i, j); const lw = w.toLowerCase();
+        out += KW.has(lw) ? `<span class="tk-kw">${esc(w)}</span>` : src[j] === '(' ? `<span class="tk-fn">${esc(w)}</span>` : esc(w); i = j; continue; }
+      if (c === '?') { out += '<span class="tk-param">?</span>'; i++; continue; }
+      out += esc(c); i++;
+    }
+    return out;
+  }
+  const sqlEl = $('sql');
+  function syncEditor() {
+    const v = sqlEl.value; $('hl').innerHTML = (v ? highlight(v) : '<span class="tk-ph">SELECT * FROM …</span>') + '\n';
+    const lines = v.split('\n').length; let g = ''; for (let k = 1; k <= lines; k++) g += k + '\n'; $('gutter').textContent = g;
+  }
+  sqlEl.addEventListener('input', syncEditor);
+  sqlEl.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) toggleLive(); else run(); return; }
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); document.execCommand('insertText', false, '  ') || insertAt('  '); }
+  });
+  function insertAt(t) { const s = sqlEl.selectionStart, en = sqlEl.selectionEnd; sqlEl.value = sqlEl.value.slice(0, s) + t + sqlEl.value.slice(en); sqlEl.selectionStart = sqlEl.selectionEnd = s + t.length; syncEditor(); return true; }
+  function setSQL(text, focus) { sqlEl.value = text; syncEditor(); if (focus) { sqlEl.focus(); sqlEl.selectionStart = sqlEl.selectionEnd = text.length; } }
+  $('params').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
+  $('paramsbtn').onclick = () => { const open = $('paramsrow').classList.toggle('hidden') === false; $('paramsbtn').setAttribute('aria-expanded', String(open)); if (open) $('params').focus(); };
+
   // ---- status + tables
+  let tablesCache = [], tablesKey = '', selected = '', filter = '';
+  const openTables = new Set(store.get('sqweezdb.open', []));
   async function refresh() {
+    if (!$('gate').classList.contains('hidden')) return;
     try {
       const st = await api('/api/status');
-      $('dir').textContent = st.dir;
+      setConn('ok', 'connected');
+      const parts = st.dir.replace(/\/+$/, '').split('/'); const base = parts.pop() || st.dir; const parent = parts.join('/') || '/';
+      $('dbbase').textContent = base; $('dbpath').textContent = parent.length > 34 ? '…' + parent.slice(-33) : parent; $('dbname').title = st.dir;
       const b = st.backup;
-      const rows = [['durability', st.durable], ['log seq', st.seq.toLocaleString()], ['durable seq', st.durableSeq.toLocaleString()], ['log written', fmtBytes(st.logBytes)], ['tables', st.tables], ['snapshots by policy', st.snapshotsByPolicy],
-        ['backup', b ? `${b.bucket} (${b.encrypted ? 'encrypted' : 'plaintext'})` : 'off'], b ? ['bucket behind', b.behind === 0 ? 'in sync' : b.behind.toLocaleString() + ' commits'] : null, b ? ['uploaded', `${b.objects} objects, ${fmtBytes(b.bytes)}`] : null,
-        st.followerApplied != null ? ['follower applied', st.followerApplied.toLocaleString()] : null, st.altersInProgress.length ? ['ALTER in progress', st.altersInProgress.join(', ')] : null,
-        ['listeners', [st.listen.socket, st.listen.tcp, st.listen.http].filter(Boolean).join('  ') || 'none'], st.reactor ? ['live events', `${st.reactor.events.toLocaleString()} (${st.reactor.reruns} re-runs)`] : null].filter(Boolean);
-      $('status').innerHTML = rows.map(([k, v]) => `<b>${esc(k)}</b><span>${esc(v)}</span>`).join('');
+      const rows = [['Durability', st.durable === 'visible' ? 'fast' : st.durable], ['Log sequence', fmtN(st.seq)], ['Durable through', fmtN(st.durableSeq)], ['Log size', fmtBytes(st.logBytes)], ['Snapshots', fmtN(st.snapshotsByPolicy)],
+        ['Backup', b ? (BK[b.state] || ['', b.state])[1].toLowerCase() : 'off', b ? (BK[b.state] || ['warn'])[0] : ''], b ? ['Bucket behind', b.behind === 0 ? 'in sync' : fmtN(b.behind) + ' commits'] : null,
+        st.followerApplied != null ? ['Follower at', fmtN(st.followerApplied)] : null, st.altersInProgress.length ? ['Altering', st.altersInProgress.join(', ')] : null,
+        ['Listening', [st.listen.socket, st.listen.tcp, st.listen.http].filter(Boolean).join(' ') || 'none'], st.reactor ? ['Live events', fmtN(st.reactor.events)] : null].filter(Boolean);
+      $('status').innerHTML = rows.map(([k, v, c]) => `<dt>${esc(k)}</dt><dd${c ? ` class="${c}"` : ''} title="${esc(v)}">${esc(v)}</dd>`).join('');
+      lastStatus = st; renderBackup();
       const ts = await api('/api/tables');
-      tablesCache = ts;
+      tablesCache = ts; $('tcount').textContent = ts.length;
       // rebuild the list only when it changed: replacing it under the pointer every 2 s would swallow clicks
-      const key = JSON.stringify(ts); if (key === tablesKey) return; tablesKey = key;
-      $('tables').innerHTML = ts.length ? ts.map((t) => `<li data-name="${esc(t.name)}"><div>${esc(t.name)}<small>${t.columns.map((c) => esc(c.name) + (c.pk ? ' 🔑' : '')).join(', ')}</small></div><button class="tedit" data-edit="${esc(t.name)}" title="Edit table" aria-label="Edit table ${esc(t.name)}">✎</button><span class="n">${t.rows < 0 ? '?' : Number(t.rows).toLocaleString()}</span></li>`).join('') : '<li class="muted">no tables yet · <a href="#" id="firsttable">create one</a></li>';
-      for (const li of $('tables').querySelectorAll('li[data-name]')) li.onclick = (e) => { if (e.target.closest('.tedit')) { openDesigner(li.dataset.name); return; } $('sql').value = `SELECT * FROM ${qid(li.dataset.name)} LIMIT 100`; run(); showTab('console'); };
-      if ($('firsttable')) $('firsttable').onclick = (e) => { e.preventDefault(); openDesigner(null); };
-      if ($('sql').value.trim() === 'SELECT count(*) AS rows FROM' && ts.length) $('sql').value = `SELECT count(*) AS rows FROM ${qid(ts[0].name)}`;
-    } catch (e) { $('status').innerHTML = `<b>error</b><span>${esc(e.message)}</span>`; }
+      const key = JSON.stringify(ts) + '|' + filter + '|' + selected + '|' + [...openTables].join(','); if (key === tablesKey) return; tablesKey = key;
+      renderTables();
+      if (!sqlEl.value.trim()) renderEmpty();
+    } catch (e) { if (e.code === 'OFFLINE') setConn('bad', 'offline'); }
   }
-  // ---- console
-  let live = null;
-  function render(res, meta) {
-    const cols = res.columns || [];
-    const rows = res.rows || []; const shown = rows.slice(0, 1000);
-    const cell = (v) => v === null || v === undefined ? '<td class="null">NULL</td>' : typeof v === 'number' ? `<td class="num">${v}</td>` : `<td>${esc(v)}</td>`;
-    $('result').innerHTML = cols.length ? `<thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${shown.map((r) => `<tr>${r.map(cell).join('')}</tr>`).join('')}</tbody>` : (rows.length ? '' : '<tbody><tr><td class="muted">ok</td></tr></tbody>');
-    $('meta').innerHTML = meta;
-    $('err').classList.add('hidden');
+  function colIcon(c) { return c.pk ? icon('key', 'key') : c.references ? icon('link') : ''; }
+  function renderTables() {
+    const ts = tablesCache.filter((t) => !filter || t.name.toLowerCase().includes(filter));
+    if (!tablesCache.length) { $('tables').innerHTML = `<li class="tempty">No tables yet.<br><button class="btn btn-sm" id="firsttable">${icon('plus')}Create a table</button></li>`; $('firsttable').onclick = () => openDesigner(null); return; }
+    if (!ts.length) { $('tables').innerHTML = `<li class="tempty">No table matches “${esc(filter)}”.</li>`; return; }
+    $('tables').innerHTML = ts.map((t) => {
+      const open = openTables.has(t.name);
+      return `<li><div class="trow${open ? ' open' : ''}${t.name === selected ? ' sel' : ''}" data-name="${esc(t.name)}" title="Query ${esc(t.name)}">`
+        + `<button class="chev" data-toggle="${esc(t.name)}" aria-label="${open ? 'Hide' : 'Show'} columns of ${esc(t.name)}" aria-expanded="${open}">${icon('chev')}</button>`
+        + `<span class="tname">${esc(t.name)}</span><span class="rows">${t.rows < 0 ? '?' : fmtN(t.rows)}</span>`
+        + `<button class="icon-btn tedit" data-edit="${esc(t.name)}" title="Edit table" aria-label="Edit table ${esc(t.name)}">${icon('edit')}</button></div>`
+        + (open ? `<ul class="cols">${t.columns.map((c) => `<li title="${esc(c.name)} ${esc(c.type)}${c.pk ? ', primary key' : ''}${c.references ? ', references ' + esc(c.references.table) : ''}${c.nullable ? '' : ', not null'}">${colIcon(c) || '<span style="width:12px"></span>'}<span class="cn">${esc(c.name)}</span><span class="ct">${esc(c.type.toLowerCase())}</span></li>`).join('')}</ul>` : '')
+        + '</li>';
+    }).join('');
   }
-  function showErr(e) { $('err').innerHTML = `<b>${esc(e.code || 'ERROR')}</b>${esc(e.message)}`; $('err').classList.remove('hidden'); $('meta').textContent = ''; }
-  function params() { const p = $('params').value.trim(); if (!p) return []; const v = JSON.parse(p); if (!Array.isArray(v)) throw Object.assign(new Error('parameters must be a JSON array'), { code: 'ARGUMENTS' }); return v; }
+  $('tables').addEventListener('click', (e) => {
+    const tg = e.target.closest('[data-toggle]'); if (tg) { const n = tg.dataset.toggle; if (openTables.has(n)) openTables.delete(n); else openTables.add(n); store.set('sqweezdb.open', [...openTables]); tablesKey = ''; renderTables(); return; }
+    const ed = e.target.closest('[data-edit]'); if (ed) { openDesigner(ed.dataset.edit); return; }
+    const row = e.target.closest('.trow'); if (row) { selected = row.dataset.name; tablesKey = ''; renderTables(); setSQL(`SELECT * FROM ${qid(row.dataset.name)} LIMIT 100`); showTab('console'); run(); }
+  });
+  $('tfilter').addEventListener('input', () => { filter = $('tfilter').value.trim().toLowerCase(); tablesKey = ''; renderTables(); });
+  $('newtable').onclick = () => openDesigner(null);
+
+  // ---- empty state
+  function renderEmpty() {
+    const first = tablesCache[0] ? qid(tablesCache[0].name) : null;
+    const ex = first ? [`SELECT * FROM ${first} LIMIT 100`, `SELECT count(*) FROM ${first}`] : ['CREATE TABLE notes (id SERIAL PRIMARY KEY, body TEXT)'];
+    $('empty').innerHTML = `<div class="box"><div class="glyph">${icon('terminal')}</div><h3>${first ? 'Run a query' : 'Start with a table'}</h3>`
+      + `<p>${first ? 'Pick a table on the left, or write SQL above.' : 'Create one with the + next to Tables, or write the SQL yourself.'} Turn on Live and the result keeps itself up to date as rows change.</p>`
+      + `<div class="chips">${ex.map((q) => `<button class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`
+      + `<div class="shortcuts"><span><kbd>${MOD}</kbd><kbd>↵</kbd> run</span><span><kbd>${MOD}</kbd><kbd>⇧</kbd><kbd>↵</kbd> live</span><span><kbd>/</kbd> find a table</span></div></div>`;
+  }
+  $('empty').addEventListener('click', (e) => { const c = e.target.closest('[data-q]'); if (c) { setSQL(c.dataset.q, true); run(); } });
+
+  // ---- results
+  function cellHTML(v, type) {
+    if (v === null || v === undefined) return ['', '<span class="null">NULL</span>'];
+    if (typeof v === 'boolean') return ['', `<span class="${v ? 't' : 'f'}">${v}</span>`];
+    if (typeof v === 'number') return ['num', esc(Number.isInteger(v) ? v : +v.toPrecision(12))];
+    const t = (type || '').toUpperCase();
+    return [t === 'UUID' || t === 'TIMESTAMP' || t.startsWith('BYTES') ? 'mono' : '', esc(v)];
+  }
+  let lastRes = null;
+  function render(res, flashRows) {
+    lastRes = res;
+    const cols = res.columns || [], types = res.types || [], rows = res.rows || []; const shown = rows.slice(0, 1000);
+    $('empty').classList.add('hidden'); $('results').classList.remove('hidden'); $('err').classList.add('hidden');
+    if (!cols.length) { $('result').innerHTML = `<tbody><tr><td><div class="ok-line">${icon('check')}Done${res.count ? ` · ${fmtN(res.count)} row${res.count === 1 ? '' : 's'} changed` : ''}</div></td></tr></tbody>`; return; }
+    const numeric = cols.map((_, k) => /^(INT|DOUBLE)$/i.test(types[k] || '') || (!types[k] && shown.some((r) => typeof r[k] === 'number') && shown.every((r) => r[k] === null || typeof r[k] === 'number')));
+    const head = `<thead><tr><th class="rn">#</th>${cols.map((c, k) => `<th${numeric[k] ? ' class="num"' : ''}>${esc(c)}${types[k] ? `<small>${esc(String(types[k]).toLowerCase())}</small>` : ''}</th>`).join('')}<th class="fill"></th></tr></thead>`;
+    if (!shown.length) { $('result').innerHTML = head + `<tbody><tr><td class="none" colspan="${cols.length + 2}">No rows</td></tr></tbody>`; return; }
+    const body = shown.map((r, i) => `<tr${flashRows && flashRows.has(JSON.stringify(r)) ? ' class="flash"' : ''}><td class="rn">${i + 1}</td>${r.map((v, k) => { const [cls, html] = cellHTML(v, types[k]); return `<td${cls ? ` class="${cls}"` : ''} data-c="${k}" title="${v === null ? 'NULL' : esc(typeof v === 'string' && v.length > 40 ? v : typeof v === 'number' && !Number.isInteger(v) && String(v).length > 12 ? String(v) : '')}">${html}</td>`; }).join('')}<td class="fill"></td></tr>`).join('');
+    $('result').innerHTML = head + `<tbody>${body}</tbody>`;
+  }
+  $('result').addEventListener('click', (e) => {
+    const td = e.target.closest('td[data-c]'); if (!td || !lastRes) return;
+    const tr = td.parentElement; const i = [...tr.parentElement.children].indexOf(tr); const v = lastRes.rows[i][Number(td.dataset.c)];
+    const text = v === null ? 'NULL' : typeof v === 'string' ? v : JSON.stringify(v);
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('Copied ' + (text.length > 48 ? text.slice(0, 48) + '…' : text)), () => {});
+  });
+  function setMeta(parts) { $('meta').innerHTML = parts.filter(Boolean).join('<span class="sep"></span>'); }
+  function showErr(e) {
+    $('err').innerHTML = `<span class="ecode">${esc(e.code || 'ERROR')}</span><span class="msg">${esc(e.message)}</span><button class="icon-btn x" aria-label="Dismiss">${icon('x')}</button>`;
+    $('err').classList.remove('hidden'); $('results').classList.add('hidden'); $('empty').classList.add('hidden'); setMeta([]); $('err').querySelector('.x').onclick = () => { $('err').classList.add('hidden'); if (lastRes) $('results').classList.remove('hidden'); };
+  }
+  function params() { const p = $('params').value.trim(); if (!p) return []; let v; try { v = JSON.parse(p); } catch (_) { throw Object.assign(new Error('parameters must be a JSON array, like [42, "alice"]'), { code: 'ARGUMENTS' }); } if (!Array.isArray(v)) throw Object.assign(new Error('parameters must be a JSON array'), { code: 'ARGUMENTS' }); return v; }
+
+  // ---- history (this browser only)
+  function remember(q) { q = q.trim(); if (!q) return; const h = store.get('sqweezdb.history', []).filter((x) => x.q !== q); h.unshift({ q, at: Date.now() }); store.set('sqweezdb.history', h.slice(0, 40)); }
+  function ago(t) { const s = (Date.now() - t) / 1000; return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : Math.floor(s / 86400) + ' d ago'; }
+  let pop = null;
+  function closePop() { if (pop) { pop.remove(); pop = null; $('histbtn').setAttribute('aria-expanded', 'false'); } }
+  $('histbtn').onclick = (e) => {
+    e.stopPropagation(); if (pop) return closePop();
+    const h = store.get('sqweezdb.history', []); pop = document.createElement('div'); pop.className = 'pop'; pop.setAttribute('role', 'menu');
+    pop.innerHTML = h.length ? h.map((x, k) => `<button class="item" role="menuitem" data-k="${k}"><code>${esc(x.q.replace(/\s+/g, ' '))}</code><small>${ago(x.at)}</small></button>`).join('') : '<div class="none">Queries you run show up here.</div>';
+    document.body.append(pop); const r = $('histbtn').getBoundingClientRect(); pop.style.left = Math.max(16, Math.min(r.left, innerWidth - pop.offsetWidth - 16)) + 'px'; pop.style.top = (r.bottom + 6 + scrollY) + 'px';
+    $('histbtn').setAttribute('aria-expanded', 'true');
+    pop.addEventListener('click', (ev) => { const it = ev.target.closest('[data-k]'); if (it) { setSQL(h[Number(it.dataset.k)].q, true); closePop(); } });
+    const firstItem = pop.querySelector('.item'); if (firstItem) firstItem.focus();
+  };
+  document.addEventListener('click', (e) => { if (pop && !pop.contains(e.target)) closePop(); });
+
+  // ---- run + live
+  let running = false;
   async function run() {
-    stopLive();
-    try { const res = await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql: $('sql').value, params: params() }) });
-      render(res, `${res.count.toLocaleString()} row${res.count === 1 ? '' : 's'} · ${res.ms.toFixed(2)} ms${res.lastInsertId != null ? ' · inserted id ' + (typeof res.lastInsertId === 'number' ? res.lastInsertId.toLocaleString() : res.lastInsertId) : ''}${res.inTransaction ? ' · in transaction' : ''}${res.count > 1000 ? ' · showing 1,000' : ''}`); refresh();
-    } catch (e) { showErr(e); }
+    if (running) return; stopLive(); closePop();
+    const q = sqlEl.value; if (!q.trim()) return;
+    let p; try { p = params(); } catch (e) { return showErr(e); }
+    running = true; $('run').disabled = true;
+    try { const res = await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql: q, params: p }) });
+      render(res); remember(q);
+      setMeta([res.columns && res.columns.length ? `<b>${fmtN(res.count)}</b> row${res.count === 1 ? '' : 's'}` : null, `${res.ms < 1 ? res.ms.toFixed(2) : res.ms.toFixed(1)} ms`,
+        res.lastInsertId != null ? `inserted <b class="mono">${esc(typeof res.lastInsertId === 'number' ? fmtN(res.lastInsertId) : res.lastInsertId)}</b>` : null,
+        res.inTransaction ? 'in a transaction' : null, res.count > 1000 ? 'showing the first 1,000' : null]);
+      if (!/^\s*(select|with)\b/i.test(q)) { tablesKey = ''; refresh(); }
+    } catch (e) { if (!e.auth) showErr(e); }
+    finally { running = false; $('run').disabled = false; }
   }
-  function stopLive() { if (live) { live.close(); live = null; $('live').classList.remove('on'); } }
+  let live = null;
+  function stopLive() { if (live) { live.close(); live = null; } $('live').setAttribute('aria-pressed', 'false'); }
+  function toggleLive() { if (live) { stopLive(); setMeta([lastRes ? `<b>${fmtN((lastRes.rows || []).length)}</b> rows` : null, 'live stopped']); } else startLive(); }
   // A browser event stream cannot read an error response, so when one fails before its first event, ask the same URL
   // again with fetch for the server's reason (the request fails fast with a JSON error; a working stream is not retried).
   async function streamError(url, fallback) {
@@ -155,52 +629,148 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
   }
   const isSelect = (s) => /^\s*(select|with)\b/i.test(s);
   function startLive() {
-    stopLive();
-    if (!isSelect($('sql').value)) return showErr({ code: 'LIVE', message: 'Live keeps the result of a SELECT up to date as rows change. Run INSERT, UPDATE, DELETE and CREATE with Run, then put a SELECT in the editor and click Live.' });
+    stopLive(); closePop();
+    if (!isSelect(sqlEl.value)) return showErr({ code: 'LIVE', message: 'Live keeps the result of a SELECT up to date. Run INSERT, UPDATE, DELETE and CREATE with Run, then put a SELECT in the editor and turn Live on.' });
     let p; try { p = params(); } catch (e) { return showErr(e); }
-    const url = `/api/live?sql=${encodeURIComponent($('sql').value)}&params=${encodeURIComponent(JSON.stringify(p))}&token=${encodeURIComponent(token)}`;
+    const url = `/api/live?sql=${encodeURIComponent(sqlEl.value)}&params=${encodeURIComponent(JSON.stringify(p))}&token=${encodeURIComponent(token)}`;
     let n = 0; const t0 = performance.now(); let prev = null;
-    live = new EventSource(url);
-    live.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'rows') { n += m.initial ? 0 : 1;
-        // rows that appeared and disappeared since the last result, compared whole (a changed aggregate row counts once each way)
-        const cur = m.rows.map((r) => JSON.stringify(r)); let diff = '';
-        if (prev) { const a = new Set(prev), b = new Set(cur); const plus = cur.filter((x) => !a.has(x)).length, minus = prev.filter((x) => !b.has(x)).length; diff = ` · last change +${plus} −${minus}`; }
+    remember(sqlEl.value);
+    live = new EventSource(url); $('live').setAttribute('aria-pressed', 'true');
+    let got = false;
+    live.onmessage = (ev) => { got = true; const m = JSON.parse(ev.data);
+      if (m.type === 'rows') { if (!m.initial) n++;
+        const cur = m.rows.map((r) => JSON.stringify(r)); let flash = null, diff = null;
+        if (prev) { const a = new Set(prev), b = new Set(cur); flash = new Set(cur.filter((x) => !a.has(x))); diff = `last change <b>+${flash.size}</b> <b>−${prev.filter((x) => !b.has(x)).length}</b>`; }
         prev = cur;
-        render(m, `<span class="badge live">LIVE</span> ${m.rows.length.toLocaleString()} rows · ${n} update${n === 1 ? '' : 's'} in ${((performance.now() - t0) / 1000).toFixed(0)} s${diff}`); } else if (m.type === 'overflow') { showErr({ code: 'OVERFLOW', message: 'the live query fell behind and was dropped; start it again' }); stopLive(); } };
-    let got = false; live.addEventListener('message', () => { got = true; });
-    live.onerror = async () => { const wasLive = live; stopLive(); if (!wasLive) return; showErr(got ? { code: 'ERROR', message: 'the live stream stopped (the server went away or was restarted)' } : await streamError(url, 'the live stream could not start')); };
-    $('live').classList.add('on');
+        render(m, flash);
+        setMeta(['<span class="live-tag"><span class="dot" style="background:var(--ok)"></span>LIVE</span>', `<b>${fmtN(m.rows.length)}</b> rows`, `${n} update${n === 1 ? '' : 's'} in ${((performance.now() - t0) / 1000).toFixed(0)} s`, diff]);
+      } else if (m.type === 'overflow') { showErr({ code: 'OVERFLOW', message: 'the live query fell behind and was dropped; turn Live on again' }); stopLive(); } };
+    live.onerror = async () => { const was = live; stopLive(); if (!was) return; showErr(got ? { code: 'ERROR', message: 'the live stream stopped (the server went away or was restarted)' } : await streamError(url, 'the live stream could not start')); };
   }
-  $('run').onclick = run; $('live').onclick = () => (live ? stopLive() : startLive());
-  $('sql').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
-  $('snap').onclick = async () => { $('snap').disabled = true; try { const s = await api('/api/snapshot', { method: 'POST', body: '{}' }); $('snapmeta').textContent = `${s.rows.toLocaleString()} rows, ${fmtBytes(s.bytes)} in ${(s.secs * 1000).toFixed(0)} ms, ${s.deletedSegments} segments freed`; refresh(); } catch (e) { $('snapmeta').textContent = e.message; } $('snap').disabled = false; };
-  // ---- changes tail
-  let tail = null;
+  $('run').onclick = run; $('live').onclick = toggleLive;
+  $('snap').onclick = async () => { $('snap').disabled = true; try { const s = await api('/api/snapshot', { method: 'POST', body: '{}' }); toast(`Snapshot: ${fmtN(s.rows)} rows, ${fmtBytes(s.bytes)} in ${(s.secs * 1000).toFixed(0)} ms`); refresh(); } catch (e) { if (!e.auth) toast(e.message, true); } $('snap').disabled = false; };
+
+  // ---- changes feed
+  let tail = null, evCount = 0;
+  function feedEmpty() {
+    $('fempty').innerHTML = `<div class="box"><div class="glyph">${icon('pulse')}</div><h3>Follow changes as they commit</h3><p>Every insert, update and delete that matches the SELECT above appears here the moment it commits, newest first.</p></div>`;
+    $('fempty').classList.toggle('hidden', $('events').children.length > 0);
+  }
+  function stopFeed() { if (tail) { tail.close(); tail = null; } $('cstart').textContent = 'Follow'; $('cstart').className = 'btn btn-primary'; $('feedbadge').classList.add('hidden'); }
   $('cstart').onclick = () => {
-    if (tail) { tail.close(); tail = null; $('cstart').textContent = 'Start'; $('cstart').classList.add('primary'); return; }
-    if (!isSelect($('csql').value)) { $('cmeta').textContent = 'give a SELECT on one table; its WHERE is the filter'; return; }
-    const url = `/api/changes?sql=${encodeURIComponent($('csql').value)}&token=${encodeURIComponent(token)}`; let n = 0; let got = false;
-    tail = new EventSource(url); $('cstart').textContent = 'Stop'; $('cstart').classList.remove('primary'); $('events').innerHTML = '';
-    tail.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type !== 'change') { if (m.type === 'overflow') $('cmeta').textContent = 'fell behind, dropped'; return; } n++;
-      const row = m.row ? m.columns.map((c, i) => `${c}=${m.row[i] === null ? 'NULL' : JSON.stringify(m.row[i])}`).join(' ') : '';
-      const div = document.createElement('div'); const op = ['insert', 'update', 'delete'].includes(m.op) ? m.op : 'change';
-      div.innerHTML = `<span class="badge ${op}">${op}</span><span class="k">${esc(m.table)} #${esc(m.key)}</span><span>${esc(row)}</span><span class="k">seq ${esc(m.seq)}</span>`;
-      $('events').prepend(div); while ($('events').children.length > 200) $('events').lastChild.remove(); $('cmeta').textContent = `${n} events`; };
-    tail.addEventListener('message', () => { got = true; });
-    tail.onerror = async () => { if (!tail) return; $('cstart').click(); const e = got ? { message: 'the stream stopped (the server went away or was restarted)' } : await streamError(url, 'the change stream could not start'); $('cmeta').textContent = e.message; };
+    if (tail) { stopFeed(); $('cmeta').textContent = `Stopped after ${fmtN(evCount)} change${evCount === 1 ? '' : 's'}.`; return; }
+    if (!$('csql').value.trim() && tablesCache[0]) $('csql').value = `SELECT * FROM ${qid(tablesCache[0].name)}`;
+    if (!isSelect($('csql').value)) { $('cmeta').textContent = 'Give a SELECT on one table; its WHERE is the filter.'; return; }
+    const url = `/api/changes?sql=${encodeURIComponent($('csql').value)}&token=${encodeURIComponent(token)}`; evCount = 0; let got = false;
+    tail = new EventSource(url); $('cstart').textContent = 'Stop'; $('cstart').className = 'btn'; $('feedbadge').classList.remove('hidden');
+    $('cmeta').innerHTML = '<span class="live-tag"><span class="dot" style="background:var(--ok)"></span>FOLLOWING</span> waiting for changes…';
+    tail.onmessage = (ev) => { got = true; const m = JSON.parse(ev.data); if (m.type !== 'change') { if (m.type === 'overflow') { $('cmeta').textContent = 'Fell behind and was dropped; follow again.'; stopFeed(); } return; } evCount++;
+      const op = ['insert', 'update', 'delete'].includes(m.op) ? m.op : 'update';
+      const vals = m.row ? m.columns.map((c, i) => `${esc(c)}=<b>${esc(m.row[i] === null ? 'NULL' : typeof m.row[i] === 'string' ? m.row[i] : JSON.stringify(m.row[i]))}</b>`).join('  ') : '';
+      const d = document.createElement('div'); d.className = 'ev';
+      d.innerHTML = `<span class="time">${new Date().toLocaleTimeString([], { hour12: false })}</span><span class="op ${op}">${op}</span><span class="tb" title="${esc(m.table)} ${esc(m.key)}">${esc(m.table)}<span class="key">${esc(m.key)}</span></span><span class="vals">${vals}</span><span class="seq">#${esc(m.seq)}</span>`;
+      $('events').prepend(d); while ($('events').children.length > 300) $('events').lastChild.remove(); $('fempty').classList.add('hidden');
+      $('cmeta').innerHTML = `<span class="live-tag"><span class="dot" style="background:var(--ok)"></span>FOLLOWING</span> ${fmtN(evCount)} change${evCount === 1 ? '' : 's'}`; };
+    tail.onerror = async () => { if (!tail) return; stopFeed(); const e = got ? { message: 'The stream stopped (the server went away or was restarted).' } : await streamError(url, 'the change stream could not start'); $('cmeta').textContent = e.message; };
   };
+  $('csql').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (tail) stopFeed(); $('cstart').click(); } });
+  $('cclear').onclick = () => { $('events').textContent = ''; feedEmpty(); };
+
   // ---- access control
   async function acl() {
     try { const a = await api('/api/acl');
-      const tbl = (title, head, rows) => `<h2>${title}</h2><div class="grid" style="max-height:30vh;margin-bottom:12px"><table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('') : `<tr><td class="muted" colspan="${head.length}">none</td></tr>`}</tbody></table></div>`;
-      $('acl').innerHTML = tbl('Users', ['user', 'roles', 'attributes'], a.users.map((u) => [u.name, u.roles.join(', '), Object.entries(u.attrs).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ')]))
-        + tbl('Roles', ['role'], a.roles.map((r) => [r])) + tbl('Grants', ['role', 'table', 'commands'], a.grants.map((g) => [g.role, g.table, g.commands.join(', ')]))
-        + tbl('Row policies', ['policy', 'table', 'role', 'commands', 'using'], a.policies.map((p) => [p.name, p.table, p.role, p.commands.join(', '), p.using]));
-    } catch (e) { $('acl').innerHTML = `<div class="err"><b>${esc(e.code)}</b>${esc(e.message)}</div>`; }
+      const card = (w, title, ic, head, rows, none) => `<section class="card acl-card ${w}"><header>${icon(ic)}${title}<span class="count">${rows.length}</span></header>${rows.length ? `<div class="grid"><table class="data"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c, k) => `<td${k ? '' : ' style="color:var(--text)"'}>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : `<div class="none">${none}</div>`}</section>`;
+      const examples = ['CREATE ROLE customer', 'GRANT SELECT, INSERT ON orders TO customer', 'CREATE POLICY own_orders ON orders FOR ALL TO customer USING (tenant_id = SESSION.tenant)', 'CREATE USER alice IN ROLE customer WITH tenant = 7'];
+      $('acl').innerHTML = card('w4', 'Row policies', 'table', ['policy', 'table', 'role', 'commands', 'using'], a.policies.map((p) => [p.name, p.table, p.role, p.commands.join(', '), p.using]), 'No row policies: a role with a grant sees every row of that table.')
+        + card('w2', 'Grants', 'key', ['role', 'table', 'commands'], a.grants.map((g) => [g.role, g.table, g.commands.join(', ')]), 'Nothing granted yet. A role can do nothing until it is granted commands on a table.')
+        + card('w1', 'Roles', 'shield', ['role'], a.roles.map((r) => [r]), 'No roles yet.')
+        + card('w1', 'Stored users', 'pulse', ['user', 'roles', 'attributes'], a.users.map((u) => [u.name, u.roles.join(', '), Object.entries(u.attrs).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ')]), 'None. Applications usually pass who is asking per request: db.as({ role, ...attributes }).')
+        + `<section class="card examples w4"><h4>Set up access</h4><p>Run these from the Query tab. Applications then act as a role with <span class="mono">db.as({ role: 'customer', tenant: 42 })</span>.</p>${examples.map((q) => `<div class="ex"><code>${highlight(q)}</code><button class="btn btn-sm" data-q="${esc(q)}">Open in editor</button></div>`).join('')}</section>`;
+    } catch (e) { if (!e.auth) $('acl').innerHTML = `<div class="alert"><span class="ecode">${esc(e.code)}</span><span class="msg">${esc(e.message)}</span></div>`; }
   }
-  $('aclrefresh').onclick = acl;
+  $('acl').addEventListener('click', (e) => { const b = e.target.closest('[data-q]'); if (b) { setSQL(b.dataset.q, true); showTab('console'); } });
+
+  // ---- backup: health of the uploader when on; a settings file and the restart command when off
+  let lastStatus = null, bkMode = '';
+  const BK = { healthy: ['ok', 'Healthy'], connecting: ['warn', 'Connecting'], retrying: ['warn', 'Retrying'], failing: ['bad', 'Failing'] };
+  function since(at, now) { if (!at) return 'never'; const s = Math.max(0, (now - at) / 1000); return s < 2 ? 'just now' : s < 60 ? Math.round(s) + ' s ago' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; }
+  const fmtDur = (ms) => ms == null ? '—' : ms >= 60000 && ms % 60000 === 0 ? ms / 60000 + ' min' : ms >= 1000 && ms % 1000 === 0 ? ms / 1000 + ' s' : ms + ' ms';
+  function copyText(t) { if (navigator.clipboard) navigator.clipboard.writeText(t).then(() => toast('Copied'), () => toast('Copy failed; select the text instead', true)); }
+  function tomlHL(src) {
+    return src.split('\n').map((l) => { if (/^\s*#/.test(l)) return `<span class="tk-cmt">${esc(l)}</span>`; if (/^\s*\[.*\]\s*$/.test(l)) return `<span class="tk-kw">${esc(l)}</span>`;
+      const m = /^(\s*[A-Za-z_]+)(\s*=\s*)(.*)$/.exec(l); if (!m) return esc(l); const v = /^".*"$/.test(m[3]) ? `<span class="tk-str">${esc(m[3])}</span>` : `<span class="tk-num">${esc(m[3])}</span>`; return esc(m[1]) + esc(m[2]) + v; }).join('\n');
+  }
+  function renderBackupOff(st) {
+    const base = st.dir.replace(/\/+$/, '').split('/').pop() || 'db';
+    $('bk').innerHTML = `<section class="card bk-head"><div class="big"><span class="state"><span class="dot"></span>Off</span>Backup is not set up</div>
+        <p>Backup copies every commit to an S3-compatible bucket: AWS S3, Cloudflare R2, Backblaze B2, MinIO and others. Objects are compressed with zstd and can be encrypted before they leave this machine. A new machine can start from the bucket, and you can restore to any point in time.</p>
+        <p>Backup is set when the database opens. Fill in your bucket, save the file, and restart the server with <span class="mono">--config</span>. The keys stay in environment variables: the file only names them.</p></section>
+      <section class="card"><h3>Your bucket</h3><div class="bk-form">
+        <label>Endpoint<input class="input" id="bf-endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" spellcheck="false" autocomplete="off"></label>
+        <label>Bucket<input class="input" id="bf-bucket" placeholder="my-bucket" spellcheck="false" autocomplete="off"></label>
+        <label>Prefix (a folder in the bucket)<input class="input" id="bf-prefix" value="${esc(base)}/" spellcheck="false" autocomplete="off"></label>
+        <label>Region<input class="input" id="bf-region" placeholder="us-east-1" spellcheck="false" autocomplete="off"></label></div>
+        <div class="bk-checks"><label><input type="checkbox" id="bf-encrypt" checked>Encrypt before upload (AES-256-GCM, key derived from a passphrase)</label>
+        <label><input type="checkbox" id="bf-cloud">Confirm a commit only once it is in the bucket (slower; nothing is lost if this machine is)</label></div>
+        <h3>backup.toml</h3><div class="codeblock"><pre id="bf-toml"></pre><button class="btn btn-sm" data-copy="bf-toml">Copy</button></div>
+        <h3>Restart with it</h3><div class="codeblock"><pre id="bf-cmd"></pre><button class="btn btn-sm" data-copy="bf-cmd">Copy</button></div></section>`;
+    const q = (v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    const upd = () => {
+      const v = (id, d) => $(id).value.trim() || d; const enc = $('bf-encrypt').checked, cloud = $('bf-cloud').checked;
+      const toml = '# keys come from the environment; this file only names them\n' + (cloud ? '# a commit is confirmed once it is in the bucket\ndurable = "cloud"\n\n' : '')
+        + '[backup]\n' + `endpoint   = ${q(v('bf-endpoint', 'https://s3.eu-central-1.amazonaws.com'))}\nbucket     = ${q(v('bf-bucket', 'my-bucket'))}\nprefix     = ${q($('bf-prefix').value.trim())}\nregion     = ${q(v('bf-region', 'us-east-1'))}\n`
+        + 'accessKey  = "${S3_KEY}"\nsecretKey  = "${S3_SECRET}"\n' + (enc ? 'passphrase = "${DB_PASSPHRASE}"\n' : '');
+      const dir = /\s/.test(st.dir) ? `"${st.dir}"` : st.dir; const l = st.listen || {};
+      const cmd = `S3_KEY=… S3_SECRET=…${enc ? ' DB_PASSPHRASE=…' : ''} \\\n  sqweezdb serve ${dir} --config backup.toml${l.http ? ' --ui ' + l.http : ''}${l.tcp ? ' --tcp ' + l.tcp : ''}`;
+      $('bf-toml').innerHTML = tomlHL(toml); $('bf-cmd').textContent = cmd;
+    };
+    for (const id of ['bf-endpoint', 'bf-bucket', 'bf-prefix', 'bf-region']) $(id).addEventListener('input', upd);
+    for (const id of ['bf-encrypt', 'bf-cloud']) $(id).addEventListener('change', upd);
+    $('bk').querySelectorAll('[data-copy]').forEach((b) => { b.onclick = () => copyText($(b.dataset.copy).textContent); });
+    upd();
+  }
+  function renderBackup() {
+    const st = lastStatus; if (!st) return; const b = st.backup;
+    $('bkdot').className = 'tdot ' + (b ? (BK[b.state] || ['warn'])[0] : '');
+    if ($('tab-backup').classList.contains('hidden')) return;
+    if (!b) { if (bkMode !== 'off') { bkMode = 'off'; renderBackupOff(st); } return; }
+    if (bkMode !== 'on') {
+      bkMode = 'on';
+      $('bk').innerHTML = `<section class="card bk-head" id="bkhead"></section><div class="tiles" id="bktiles"></div><section class="card bk-err hidden" id="bkerr"></section>
+        <section class="card"><div class="testhead"><h3>Connection test</h3><button class="btn btn-sm" id="bktestbtn">Test connection</button></div><p class="sub">Lists the bucket, writes a small object and deletes it, with the same settings the uploader uses.</p><div class="steps" id="bksteps"></div></section>
+        <section class="card"><h3>Settings</h3><dl class="kvgrid" id="bkset"></dl></section>`;
+      $('bktestbtn').onclick = testBackup;
+    }
+    const [c, label] = BK[b.state] || ['warn', b.state];
+    const lead = { healthy: `Every commit reaches the bucket within about ${fmtDur(b.intervalMs)}.`, connecting: 'Reading what the bucket already holds before the first upload.',
+      retrying: 'The last call to the bucket failed and is being retried. The database keeps working and catches up when the bucket answers.',
+      failing: 'Uploads keep failing. The database keeps working and catches up when the bucket answers; until then the bucket falls behind.' }[b.state] || '';
+    const blocked = b.cloudDurable && (b.state === 'retrying' || b.state === 'failing') ? `<p class="warnline">${icon('alert')}Commits wait for the bucket in this mode (durable = "cloud"), so writes are held until it answers.</p>` : '';
+    $('bkhead').innerHTML = `<div class="big"><span class="state ${c}"><span class="dot"></span>${esc(label)}</span><span class="mono dim">${esc(b.bucket || '')}</span></div><p>${lead}</p>${blocked}`;
+    const ratio = b.bytes > 0 && b.rawBytes > 0 ? (b.rawBytes / b.bytes).toFixed(1) + '×' : '—';
+    const tiles = [['Last upload', since(b.uploadAt, b.now), b.okAt ? 'bucket answered ' + since(b.okAt, b.now) : 'no answer yet'],
+      b.resumed ? ['Behind', b.behind === 0 ? 'In sync' : fmtN(b.behind), b.behind === 0 ? 'every commit is in the bucket' : 'commits not uploaded yet'] : ['Behind', 'Unknown', 'the bucket has not been read yet'],
+      ['Uploaded', fmtBytes(b.bytes), fmtN(b.objects) + ' objects'], ['Compression', b.compress ? ratio : 'Off', b.compress ? fmtBytes(b.rawBytes) + ' before zstd' : 'objects are stored as they are'],
+      ['Snapshots', fmtN(b.snapshots), `${fmtN(b.merges)} merges · ${fmtN(b.deletes)} retired`]];
+    $('bktiles').innerHTML = tiles.map(([k, v, sub]) => `<div class="card tile"><div class="k">${k}</div><div class="v" title="${esc(v)}">${esc(v)}</div><div class="s" title="${esc(sub)}">${esc(sub)}</div></div>`).join('');
+    if (b.lastError) { $('bkerr').classList.remove('hidden'); $('bkerr').classList.toggle('past', !b.failures); $('bkerr').innerHTML = `<h3>${icon('alert')}Last error<span class="dim">${since(b.errorAt, b.now)} · ${b.failures ? fmtN(b.failures) + ' failed in a row · ' : 'recovered since · '}${fmtN(b.failuresTotal)} in total</span></h3><pre>${esc(b.lastError)}</pre>`; }
+    else $('bkerr').classList.add('hidden');
+    $('bkset').innerHTML = [['Endpoint', b.endpoint], ['Bucket', b.bucketName], ['Prefix', b.prefix || '(the bucket root)'], ['Region', b.region],
+      ['Encryption', b.encrypted ? 'AES-256-GCM, key derived from the passphrase' : 'off: anyone with access to the bucket can read the data'], ['Compression', b.compress ? 'zstd' : 'off'],
+      ['Upload every', fmtDur(b.intervalMs)], ['Merge chunks older than', b.compactAfterMs ? fmtDur(b.compactAfterMs) : 'never'], ['Commits', b.cloudDurable ? 'confirmed once in the bucket (durable = "cloud")' : 'confirmed before they reach the bucket']]
+      .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v == null ? '—' : v)}</dd>`).join('');
+  }
+  async function testBackup() {
+    const btn = $('bktestbtn'); btn.disabled = true; $('bksteps').innerHTML = `<div class="step">${icon('pulse')}<span>Testing…</span></div>`;
+    const names = { connect: 'Settings', list: 'List the bucket', write: 'Write a test object', delete: 'Delete it again' };
+    try { const r = await api('/api/backup/test', { method: 'POST', body: '{}' });
+      $('bksteps').innerHTML = r.steps.map((x) => `<div class="step ${x.ok ? 'ok' : 'bad'}">${icon(x.ok ? 'check' : 'alert')}<span>${names[x.step] || esc(x.step)}</span><span class="ms">${x.ms.toFixed(0)} ms</span><span></span>${x.error ? `<div class="e">${esc(x.error)}</div>` : ''}</div>`).join('')
+        + `<div class="sumline ${r.ok ? 'ok' : 'bad'}">${r.ok ? 'The bucket works with these settings.' : 'The bucket did not accept these settings.'} <span class="dim">Tested at ${new Date().toLocaleTimeString([], { hour12: false })}.</span></div>`;
+    } catch (e) { if (!e.auth) $('bksteps').innerHTML = `<div class="step bad">${icon('alert')}<span>${esc(e.message)}</span></div>`; }
+    btn.disabled = false;
+  }
+
   // ---- table designer: builds CREATE TABLE / ALTER TABLE from a form; shows the SQL it will run
-  let tablesCache = [], tablesKey = '';
   const TYPES = ['INT', 'DOUBLE', 'BOOL', 'TEXT', 'BYTES', 'TIMESTAMP', 'UUID'];
   const RESERVED = new Set('select from where order group by limit insert into values update set delete create alter drop table column index primary key unique references default not null and or in is between like as on join check user desc asc count sum min max avg case when then else end true false'.split(' '));
   function qid(n) { return /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !RESERVED.has(n.toLowerCase()) ? n : '"' + String(n).replace(/"/g, '""') + '"'; }
@@ -212,7 +782,7 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
   const keyTypeOf = (name) => { const t = tablesCache.find((x) => x.name.toLowerCase() === name.toLowerCase()); const c = t && t.columns.find((x) => x.pk); return c ? c.type : 'INT'; };
   const KEY_TYPES = ['INT', 'UUID'];
   const LOCKED = 'cannot be changed once the table exists (yet)';
-  let D = null;
+  let D = null, lastFocus = null;
   const blank = () => ({ orig: null, name: '', type: 'TEXT', size: 255, pk: false, auto: false, notnull: false, unique: false, def: '', ref: '', onDelete: 'RESTRICT', removed: false });
   function openDesigner(name) {
     if (name) {
@@ -221,13 +791,14 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
     } else {
       D = { mode: 'create', table: '', cols: [Object.assign(blank(), { name: 'id', type: 'INT', pk: true, auto: true, notnull: true }), blank()] };
     }
-    $('dtitle').textContent = D.mode === 'create' ? 'New table' : `Edit table ${D.table}`;
+    lastFocus = document.activeElement;
+    $('dtitle').textContent = D.mode === 'create' ? 'New table' : `Edit ${D.table}`;
     $('dname').value = D.table; $('dname').disabled = D.mode === 'alter'; $('dname').title = D.mode === 'alter' ? 'renaming a table is not supported yet' : '';
     $('dapply').textContent = D.mode === 'create' ? 'Create table' : 'Apply changes';
     $('derr').classList.add('hidden'); $('designer').classList.remove('hidden');
     renderCols(); (D.mode === 'create' ? $('dname') : $('daddcol')).focus();
   }
-  function closeDesigner() { $('designer').classList.add('hidden'); D = null; }
+  function closeDesigner() { $('designer').classList.add('hidden'); D = null; if (lastFocus && lastFocus.focus) lastFocus.focus(); }
   function el(tag, attrs, kids) { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) { if (v === false || v === null || v === undefined) continue; if (k === 'text') e.textContent = v; else if (k === 'value') e.value = v; else if (k === 'checked') e.checked = !!v; else e.setAttribute(k, v === true ? '' : v); } for (const k of kids || []) e.append(k); return e; }
   function opt(v, label, sel) { const o = el('option', { value: v, text: label }); o.selected = v === sel; return o; }
   function renderCols() {
@@ -236,12 +807,12 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
     const alter = D.mode === 'alter';
     D.cols.forEach((c, i) => {
       const old = alter && c.orig; const lockKey = alter ? LOCKED : '';
-      const wrap = (node) => { const d = el('div', c.removed ? { class: 'gone' } : {}, [node]); return d; };
-      const name = el('input', { class: 'cname', value: c.name, 'aria-label': 'column name', placeholder: 'column', spellcheck: 'false', disabled: c.removed });
+      const wrap = (node) => el('div', c.removed ? { class: 'gone' } : {}, [node]);
+      const name = el('input', { class: 'input cname', value: c.name, 'aria-label': 'column name', placeholder: 'column', spellcheck: 'false', disabled: c.removed });
       name.addEventListener('input', () => { c.name = name.value; update(); });
       const typ = el('select', { 'aria-label': 'type', disabled: c.removed || c.pk && alter, title: c.pk && alter ? 'the primary key type ' + LOCKED : '' }, TYPES.map((t) => opt(t, t, c.type)));
       typ.addEventListener('change', () => { c.type = typ.value; if (c.pk && !KEY_TYPES.includes(c.type)) c.pk = false; if (c.pk && c.type === 'UUID') { c.auto = false; if (!c.def) c.def = 'uuid()'; } if (c.pk && c.type === 'INT' && c.def === 'uuid()') c.def = ''; if (c.ref && keyTypeOf(c.ref) !== c.type) c.ref = ''; renderCols(); });
-      const size = el('input', { type: 'number', min: '1', max: '65535', value: sized(c.type) ? c.size : '', disabled: !sized(c.type) || c.removed, 'aria-label': 'size', title: 'maximum length in bytes (up to 65535)' });
+      const size = el('input', { class: 'input', type: 'number', min: '1', max: '65535', value: sized(c.type) ? c.size : '', disabled: !sized(c.type) || c.removed, 'aria-label': 'size', title: 'maximum length in bytes (up to 65535)' });
       size.addEventListener('input', () => { c.size = Number(size.value); update(); });
       const pk = el('input', { type: 'radio', name: 'dpk', checked: c.pk, disabled: alter || c.removed, 'aria-label': 'primary key', title: alter ? 'the primary key ' + LOCKED : 'primary key (INT or UUID)' });
       pk.addEventListener('change', () => { D.cols.forEach((x) => { x.pk = false; }); c.pk = true; if (!KEY_TYPES.includes(c.type)) c.type = 'INT'; c.notnull = true; c.unique = false; c.ref = ''; if (c.type === 'UUID' && !c.def) c.def = 'uuid()'; renderCols(); });
@@ -249,13 +820,13 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
       nn.addEventListener('change', () => { c.notnull = nn.checked; update(); });
       const uq = el('input', { type: 'checkbox', checked: c.unique, disabled: alter || c.pk || c.removed, 'aria-label': 'unique', title: alter ? 'UNIQUE ' + LOCKED : 'one UNIQUE column per table (for now)' });
       uq.addEventListener('change', () => { D.cols.forEach((x) => { if (x !== c) x.unique = false; }); c.unique = uq.checked; renderCols(); });
-      const def = el('input', { value: c.def, 'aria-label': 'default', disabled: (c.pk && c.type !== 'UUID') || c.type === 'BYTES' || old || c.removed, title: old ? 'changing a default ' + LOCKED : c.type === 'UUID' ? 'uuid() for a time-ordered UUID, gen_random_uuid() for a random one' : c.type === 'TIMESTAMP' ? 'now() for the insert time, or a fixed time' : '', placeholder: { INT: '0', DOUBLE: '0.0', BOOL: 'true', TEXT: 'text', TIMESTAMP: 'now()', BYTES: '', UUID: 'uuid()' }[c.type] });
+      const def = el('input', { class: 'input', value: c.def, 'aria-label': 'default', disabled: (c.pk && c.type !== 'UUID') || c.type === 'BYTES' || old || c.removed, title: old ? 'changing a default ' + LOCKED : c.type === 'UUID' ? 'uuid() for a time-ordered UUID, gen_random_uuid() for a random one' : c.type === 'TIMESTAMP' ? 'now() for the insert time, or a fixed time' : '', placeholder: { INT: '0', DOUBLE: '0.0', BOOL: 'true', TEXT: 'text', TIMESTAMP: 'now()', BYTES: '', UUID: 'uuid()' }[c.type] });
       def.addEventListener('input', () => { c.def = def.value; update(); });
       let defCell = def;
       if (c.pk && c.type === 'INT') {
         const auto = el('input', { type: 'checkbox', checked: c.auto, disabled: alter || c.type !== 'INT', 'aria-label': 'automatic id', title: alter ? 'automatic ids ' + LOCKED : 'assign 1, 2, 3, … when an INSERT leaves the key out (never reused)' });
         auto.addEventListener('change', () => { c.auto = auto.checked; update(); });
-        defCell = el('label', { class: 'muted', style: 'display:flex;gap:6px;align-items:center;font-size:12px' }, [auto, document.createTextNode('auto id')]);
+        defCell = el('label', { class: 'autolbl' }, [auto, document.createTextNode('auto id')]);
       }
       const others = tablesCache.filter((t) => t.name !== D.table && keyTypeOf(t.name) === c.type).map((t) => t.name);
       const ref = el('select', { 'aria-label': 'references', disabled: alter || c.pk || c.removed || !KEY_TYPES.includes(c.type), title: alter ? 'foreign keys ' + lockKey : !KEY_TYPES.includes(c.type) ? 'a foreign key column is INT or UUID, like the key it points to' : 'tables whose key is ' + c.type }, [opt('', '—', c.ref), ...others.map((t) => opt(t, t, c.ref))]);
@@ -264,7 +835,9 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
       const act = el('select', { 'aria-label': 'on delete', disabled: alter || !c.ref || c.removed, title: 'what happens to this row when the referenced row is deleted' }, [opt('RESTRICT', 'restrict', c.onDelete), opt('CASCADE', 'cascade', c.onDelete), opt('SET NULL', 'set null', c.onDelete)]);
       act.addEventListener('change', () => { c.onDelete = act.value; update(); });
       if (!c.ref) act.style.visibility = 'hidden';
-      const rm = el('button', { class: 'icon', 'aria-label': c.removed ? 'keep column' : 'remove column', title: c.pk ? 'the primary key cannot be removed' : c.removed ? 'keep this column' : 'remove this column', disabled: c.pk, text: c.removed ? '↺' : '×' });
+      const rm = el('button', { class: 'icon-btn', 'aria-label': c.removed ? 'keep column' : 'remove column', title: c.pk ? 'the primary key cannot be removed' : c.removed ? 'keep this column' : 'remove this column', disabled: c.pk, text: c.removed ? '↺' : '' });
+      if (!c.removed) rm.innerHTML = icon('x');
+      if (c.pk) rm.style.visibility = 'hidden';
       rm.addEventListener('click', () => { if (old) c.removed = !c.removed; else D.cols.splice(i, 1); renderCols(); });
       const nameCell = el('div', c.removed ? { class: 'gone' } : {}, [name]); if (alter && !old) nameCell.append(el('span', { class: 'tag', text: 'new' }));
       nameCell.style.display = 'flex'; nameCell.style.alignItems = 'center';
@@ -284,14 +857,14 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
     return "'" + v.replace(/'/g, "''") + "'";
   }
   function build() {
-    const live = D.cols.filter((c) => !c.removed); const names = new Set();
-    for (const c of live) { const n = c.name.trim(); if (!n) throw 'every column needs a name'; if (names.has(n.toLowerCase())) throw `two columns are named ${n}`; names.add(n.toLowerCase()); if (sized(c.type) && !(Number.isInteger(c.size) && c.size >= 1 && c.size <= 65535)) throw `size of ${n} must be between 1 and 65535`; if (c.ref && c.onDelete === 'SET NULL' && c.notnull) throw `${n}: ON DELETE SET NULL needs a column that allows NULL`; }
+    const cols = D.cols.filter((c) => !c.removed); const names = new Set();
+    for (const c of cols) { const n = c.name.trim(); if (!n) throw 'every column needs a name'; if (names.has(n.toLowerCase())) throw `two columns are named ${n}`; names.add(n.toLowerCase()); if (sized(c.type) && !(Number.isInteger(c.size) && c.size >= 1 && c.size <= 65535)) throw `size of ${n} must be between 1 and 65535`; if (c.ref && c.onDelete === 'SET NULL' && c.notnull) throw `${n}: ON DELETE SET NULL needs a column that allows NULL`; }
     if (D.mode === 'create') {
       const tn = $('dname').value.trim(); if (!tn) throw 'the table needs a name';
       if (tablesCache.some((t) => t.name.toLowerCase() === tn.toLowerCase())) throw `a table named ${tn} already exists`;
-      const pks = live.filter((c) => c.pk); if (pks.length !== 1) throw 'choose one primary key column (INT or UUID)'; if (!KEY_TYPES.includes(pks[0].type)) throw 'the primary key must be INT or UUID';
-      if (live.filter((c) => c.unique).length > 1) throw 'one UNIQUE column per table (for now)';
-      const lines = live.map((c) => { let s = `  ${qid(c.name.trim())} ${sqlType(c)}`; if (c.pk) { if (c.type === 'INT') return s + ' PRIMARY KEY' + (c.auto ? ' AUTOINCREMENT' : ''); const d = literal(c); return s + ' PRIMARY KEY' + (d !== null ? ' DEFAULT ' + d : ''); } if (c.notnull) s += ' NOT NULL'; if (c.unique) s += ' UNIQUE'; const d = literal(c); if (d !== null) s += ' DEFAULT ' + d; if (c.ref) s += ` REFERENCES ${qid(c.ref)}(${qid(pkOf(c.ref))})` + (c.onDelete !== 'RESTRICT' ? ` ON DELETE ${c.onDelete}` : ''); return s; });
+      const pks = cols.filter((c) => c.pk); if (pks.length !== 1) throw 'choose one primary key column (INT or UUID)'; if (!KEY_TYPES.includes(pks[0].type)) throw 'the primary key must be INT or UUID';
+      if (cols.filter((c) => c.unique).length > 1) throw 'one UNIQUE column per table (for now)';
+      const lines = cols.map((c) => { let s = `  ${qid(c.name.trim())} ${sqlType(c)}`; if (c.pk) { if (c.type === 'INT') return s + ' PRIMARY KEY' + (c.auto ? ' AUTOINCREMENT' : ''); const d = literal(c); return s + ' PRIMARY KEY' + (d !== null ? ' DEFAULT ' + d : ''); } if (c.notnull) s += ' NOT NULL'; if (c.unique) s += ' UNIQUE'; const d = literal(c); if (d !== null) s += ' DEFAULT ' + d; if (c.ref) s += ` REFERENCES ${qid(c.ref)}(${qid(pkOf(c.ref))})` + (c.onDelete !== 'RESTRICT' ? ` ON DELETE ${c.onDelete}` : ''); return s; });
       return `CREATE TABLE ${qid(tn)} (\n${lines.join(',\n')}\n)`;
     }
     const ops = [];
@@ -308,30 +881,53 @@ pre.sql { background:var(--bg); border:1px solid var(--line); border-radius:8px;
   function update() {
     let sql = '', problem = '';
     try { sql = build(); } catch (e) { problem = String(e); }
-    $('dsql').textContent = sql || '—'; $('dapply').disabled = !!problem;
-    $('dhint').className = problem && problem !== 'no changes yet' ? 'muted bad' : 'muted';
-    $('dhint').textContent = problem || (D.mode === 'create' ? 'Primary key, UNIQUE and foreign keys cannot be changed later.' : 'Applied online: reads and writes continue while existing rows are copied.');
+    $('dsql').innerHTML = sql ? highlight(sql) : '<span class="tk-ph">—</span>'; $('dapply').disabled = !!problem;
+    const unfinished = ['no changes yet', 'every column needs a name', 'the table needs a name'].includes(problem);
+    $('dhint').className = problem && !unfinished ? 'hint bad' : 'hint';
+    $('dhint').textContent = problem || (D.mode === 'create' ? 'The primary key, UNIQUE and foreign keys cannot be changed later.' : 'Applied online: reads and writes continue while existing rows are copied.');
   }
   async function applyDesigner() {
     let sql; try { sql = build(); } catch (e) { return update(); }
     $('dapply').disabled = true; $('derr').classList.add('hidden');
     try {
       await api('/api/sql', { method: 'POST', body: JSON.stringify({ sql }) });
-      const name = D.mode === 'create' ? $('dname').value.trim() : D.table; closeDesigner();
-      await refresh(); $('sql').value = `SELECT * FROM ${qid(name)} LIMIT 100`; showTab('console'); run();
-    } catch (e) { $('derr').innerHTML = `<b>${esc(e.code || 'ERROR')}</b>${esc(e.message)}`; $('derr').classList.remove('hidden'); $('dapply').disabled = false; }
+      const name = D.mode === 'create' ? $('dname').value.trim() : D.table; const created = D.mode === 'create'; closeDesigner();
+      tablesKey = ''; await refresh(); selected = name; setSQL(`SELECT * FROM ${qid(name)} LIMIT 100`); showTab('console'); run();
+      toast(created ? `Created ${name}` : `Changed ${name}`);
+    } catch (e) { if (!e.auth) { $('derr').innerHTML = `<span class="ecode">${esc(e.code || 'ERROR')}</span><span class="msg">${esc(e.message)}</span>`; $('derr').classList.remove('hidden'); } $('dapply').disabled = false; }
   }
-  $('newtable').onclick = () => openDesigner(null);
   $('daddcol').onclick = () => { D.cols.push(blank()); renderCols(); const ins = $('dcols').querySelectorAll('input.cname'); if (ins.length) ins[ins.length - 1].focus(); };
   $('dname').addEventListener('input', update);
   $('dapply').onclick = applyDesigner; $('dcancel').onclick = closeDesigner; $('dclose').onclick = closeDesigner;
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && D) closeDesigner(); });
-  // ---- tabs, token, timers
-  function showTab(name) { for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('on', b.dataset.tab === name); for (const t of ['console', 'changes', 'acl']) $('tab-' + t).classList.toggle('hidden', t !== name); if (name === 'acl') acl(); }
-  for (const b of document.querySelectorAll('.tabs button')) b.onclick = () => showTab(b.dataset.tab);
-  $('connect').onclick = () => { token = $('token').value.trim(); try { sessionStorage.setItem('sqweezdb.token', token); } catch (_) {} refresh(); };
-  $('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('connect').click(); });
-  refresh(); setInterval(refresh, 2000);
+  $('designer').addEventListener('mousedown', (e) => { if (e.target === $('designer')) closeDesigner(); });
+  $('designer').addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return; const f = [...$('designer').querySelectorAll('button, input, select')].filter((x) => !x.disabled && x.offsetParent !== null); if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+  });
+
+  // ---- tabs, shortcuts, timers
+  function showTab(name) {
+    for (const b of document.querySelectorAll('.tab')) b.setAttribute('aria-selected', String(b.dataset.tab === name));
+    for (const t of ['console', 'changes', 'acl', 'backup']) $('tab-' + t).classList.toggle('hidden', t !== name);
+    if (name === 'acl') acl(); if (name === 'backup') renderBackup(); if (name === 'changes') { feedEmpty(); if (!$('csql').value.trim() && tablesCache[0]) $('csql').value = `SELECT * FROM ${qid(tablesCache[0].name)}`; }
+    store.set('sqweezdb.tab', name);
+  }
+  for (const b of document.querySelectorAll('.tab')) b.onclick = () => showTab(b.dataset.tab);
+  document.querySelector('.tabs').addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return; const tabs = [...document.querySelectorAll('.tab')]; const i = tabs.indexOf(document.activeElement); if (i < 0) return;
+    const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; n.focus(); showTab(n.dataset.tab);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { if (pop) return closePop(); if (D) return closeDesigner(); }
+    const typing = /INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '');
+    if (e.key === '/' && !typing && !D && $('gate').classList.contains('hidden')) { e.preventDefault(); $('tfilter').focus(); }
+  });
+  $('tfilter').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('tfilter').value = ''; filter = ''; tablesKey = ''; renderTables(); $('tfilter').blur(); } if (e.key === 'Enter') { const r = $('tables').querySelector('.trow'); if (r) r.click(); } });
+
+  syncEditor(); renderEmpty(); feedEmpty();
+  const tab0 = store.get('sqweezdb.tab', 'console'); showTab(['console', 'changes', 'acl', 'backup'].includes(tab0) ? tab0 : 'console');
+  if (!token) { setConn('warn', 'locked'); showGate(''); } else refresh();
+  setInterval(refresh, 2000);
 })();
 </script>
 </body>

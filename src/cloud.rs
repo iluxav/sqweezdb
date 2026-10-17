@@ -57,13 +57,70 @@ impl CloudConfig {
     fn suffix(&self) -> String { format!("{}{}", if self.compress { ".zst" } else { "" }, if self.key.is_some() { ".enc" } else { "" }) }
     /// Local defaults for the lab: an rclone/MinIO server on 127.0.0.1:9000 with minioadmin/minioadmin.
     pub fn local(bucket: &str, prefix: &str) -> CloudConfig { CloudConfig { endpoint: std::env::var("S3_ENDPOINT").unwrap_or("http://127.0.0.1:9000".into()), bucket: bucket.into(), prefix: prefix.into(), access_key: std::env::var("S3_KEY").unwrap_or("minioadmin".into()), secret_key: std::env::var("S3_SECRET").unwrap_or("minioadmin".into()), region: "us-east-1".into(), interval: Duration::from_secs(1), rtt: Duration::ZERO, compress: true, compact_after: Duration::from_secs(60), compact_every: Duration::from_secs(30), key: None } }
-    pub fn store(&self) -> Arc<dyn ObjectStore> { Arc::new(AmazonS3Builder::new().with_endpoint(&self.endpoint).with_bucket_name(&self.bucket).with_access_key_id(&self.access_key).with_secret_access_key(&self.secret_key).with_region(&self.region).with_allow_http(true).with_virtual_hosted_style_request(false).build().unwrap()) }
+    pub fn store(&self) -> Arc<dyn ObjectStore> { self.try_store(3).unwrap() }
+    /// The bucket client: 5 s to connect, 2 min per request (8 MB snapshot parts on a slow link), `retries` quick retries
+    /// within 30 s. Callers that keep going after an error (the uploader) retry on their own schedule.
+    pub fn try_store(&self, retries: usize) -> Result<Arc<dyn ObjectStore>, String> {
+        // the client panics while signing a request to an endpoint that is not a URL: refuse it here instead
+        check_endpoint(&self.endpoint)?;
+        let retry = object_store::RetryConfig { max_retries: retries, retry_timeout: Duration::from_secs(30), ..Default::default() };
+        let client = object_store::ClientOptions::new().with_connect_timeout(Duration::from_secs(5)).with_timeout(Duration::from_secs(120)).with_allow_http(true);
+        AmazonS3Builder::new().with_endpoint(&self.endpoint).with_bucket_name(&self.bucket).with_access_key_id(&self.access_key).with_secret_access_key(&self.secret_key).with_region(&self.region)
+            .with_allow_http(true).with_virtual_hosted_style_request(false).with_retry(retry).with_client_options(client).build().map(|s| Arc::new(s) as Arc<dyn ObjectStore>).map_err(|e| format!("bucket settings: {e}"))
+    }
     fn key(&self, rest: &str) -> OPath { OPath::from(format!("{}/{}", self.prefix.trim_matches('/'), rest)) }
 }
 pub fn rt() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
 
 /// Counters a running uploader exposes.
-pub struct CloudStats { pub puts: AtomicU64, pub bytes: AtomicU64, pub cloud_seq: AtomicU64, pub snapshots: AtomicU64, pub deletes: AtomicU64, pub last_put_ms: AtomicU64, pub merges: AtomicU64, pub raw_bytes: AtomicU64, pub compress_ms: AtomicU64, pub parts: AtomicU64 }
+#[derive(Default)]
+pub struct CloudStats { pub puts: AtomicU64, pub bytes: AtomicU64, pub cloud_seq: AtomicU64, pub snapshots: AtomicU64, pub deletes: AtomicU64, pub last_put_ms: AtomicU64, pub merges: AtomicU64, pub raw_bytes: AtomicU64, pub compress_ms: AtomicU64, pub parts: AtomicU64,
+    /// health, in Unix milliseconds: the last call the bucket answered, the last upload, the last failure
+    pub ok_at_ms: AtomicU64, pub upload_at_ms: AtomicU64, pub err_at_ms: AtomicU64,
+    /// failed calls in a row (0 = working) and in total; `resumed` once the bucket's contents were read at start
+    pub failures: AtomicU64, pub failures_total: AtomicU64, pub resumed: AtomicBool, pub last_error: std::sync::Mutex<String> }
+impl CloudStats {
+    /// The bucket answered: the connection works.
+    pub fn contact(&self) { self.ok_at_ms.store(now_ms(), Ordering::Relaxed); self.failures.store(0, Ordering::Relaxed); }
+    pub fn uploaded(&self) { self.contact(); self.upload_at_ms.store(now_ms(), Ordering::Relaxed); }
+    pub fn fail(&self, e: String) {
+        self.failures.fetch_add(1, Ordering::Relaxed); self.failures_total.fetch_add(1, Ordering::Relaxed); self.err_at_ms.store(now_ms(), Ordering::Relaxed);
+        let e: String = e.chars().take(600).collect(); *self.last_error.lock().unwrap() = e;
+    }
+    pub fn last_error(&self) -> String { self.last_error.lock().unwrap().clone() }
+    /// "connecting" until the bucket was first read, "healthy", "retrying" after one or two failed calls in a row, then "failing".
+    pub fn state(&self) -> &'static str { match self.failures.load(Ordering::Relaxed) { 0 if !self.resumed.load(Ordering::Relaxed) => "connecting", 0 => "healthy", 1 | 2 => "retrying", _ => "failing" } }
+}
+/// An endpoint must be an http(s) URL with a host: the S3 client panics on anything else.
+pub fn check_endpoint(e: &str) -> Result<(), String> {
+    let rest = e.strip_prefix("https://").or_else(|| e.strip_prefix("http://")).ok_or_else(|| format!("endpoint {e:?} must start with https:// or http://"))?;
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() || host.contains(char::is_whitespace) || host.starts_with(':') { return Err(format!("endpoint {e:?} has no host name")); }
+    Ok(())
+}
+pub fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
+/// After a failure: wait 1, 2, 4 … up to 30 s (never less than the upload interval), waking early only to stop. False when stopping.
+fn backoff(st: &CloudStats, stop: &AtomicBool, cfg: &CloudConfig) -> bool {
+    let n = st.failures.load(Ordering::Relaxed).clamp(1, 6) as u32;
+    let end = Instant::now() + cfg.interval.max(Duration::from_secs(1 << (n - 1)).min(Duration::from_secs(30)));
+    while Instant::now() < end { if stop.load(Ordering::Relaxed) { return false; } std::thread::sleep(Duration::from_millis(50)); }
+    !stop.load(Ordering::Relaxed)
+}
+/// Check a bucket the way the uploader uses it: list the prefix, write a small object, delete it. Each step with its time
+/// in milliseconds and the error, if any; stops at the first failure.
+pub fn probe(cfg: &CloudConfig) -> Vec<(&'static str, bool, f64, String)> {
+    let mut out = vec![];
+    let store = match cfg.try_store(0) { Ok(s) => s, Err(e) => { out.push(("connect", false, 0.0, e)); return out; } };
+    let rt = rt(); let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let t = Instant::now(); let r = rt.block_on(store.list_with_delimiter(Some(&cfg.key(""))));
+    let ok = r.is_ok(); out.push(("list", ok, ms(t), r.err().map(|e| e.to_string()).unwrap_or_default())); if !ok { return out; }
+    let key = cfg.key(&format!(".sqweezdb-probe-{}", now_ms()));
+    let t = Instant::now(); let r = rt.block_on(store.put(&key, PutPayload::from(b"sqweezdb connection check".to_vec())));
+    let ok = r.is_ok(); out.push(("write", ok, ms(t), r.err().map(|e| e.to_string()).unwrap_or_default())); if !ok { return out; }
+    let t = Instant::now(); let r = rt.block_on(store.delete(&key));
+    out.push(("delete", r.is_ok(), ms(t), r.err().map(|e| e.to_string()).unwrap_or_default()));
+    out
+}
 pub struct Uploader { pub stats: Arc<CloudStats>, stop: Arc<AtomicBool>, thread: Option<std::thread::JoinHandle<()>>, pub kick: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)> }
 impl Drop for Uploader { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); let (m, cv) = &*self.kick; *m.lock().unwrap() = true; cv.notify_all(); if let Some(h) = self.thread.take() { h.join().ok(); } } }
 
@@ -72,27 +129,36 @@ impl Drop for Uploader { fn drop(&mut self) { self.stop.store(true, Ordering::Re
 /// the last complete record in the bucket. A new snapshot file is uploaded when it appears; chunks of segments the
 /// snapshot made redundant are deleted.
 pub fn start_uploader(cfg: CloudConfig, dir: PathBuf, log: Arc<GLog>) -> Uploader {
-    let stats = Arc::new(CloudStats { puts: AtomicU64::new(0), bytes: AtomicU64::new(0), cloud_seq: AtomicU64::new(0), snapshots: AtomicU64::new(0), deletes: AtomicU64::new(0), last_put_ms: AtomicU64::new(0), merges: AtomicU64::new(0), raw_bytes: AtomicU64::new(0), compress_ms: AtomicU64::new(0), parts: AtomicU64::new(0) });
+    let stats = Arc::new(CloudStats::default());
     let stop = Arc::new(AtomicBool::new(false)); let kick = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let (st2, stop2, kick2) = (stats.clone(), stop.clone(), kick.clone());
     let h = std::thread::spawn(move || {
-        let rt = rt(); let store = cfg.store();
+        let rt = rt();
+        // bad settings (an endpoint that is not a URL) cannot heal: report them and stay down
+        let store = match cfg.try_store(3) { Ok(s) => s, Err(e) => { st2.fail(e); st2.failures.store(u64::MAX / 2, Ordering::Relaxed); return; } };
         let mut cur: Option<(u64, u64)> = None;  // (segment first seq, bytes uploaded so far)
         let mut last_snap: Option<u64> = None;    // s0 of the last uploaded snapshot
         // resume: what the bucket already holds (a fresh uploader must never rewrite a chunk)
         let mut existing: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
-        for (k, _) in rt.block_on(futures_lite_shim::collect_list_sized(&*store, &cfg.key("log"))) { if let Some((seg, off, len, _, _)) = parse_chunk(k.as_ref()) { let e = existing.entry(seg).or_insert(0); *e = (*e).max(off + len); } }
+        let (log_keys, snap_keys) = loop {
+            let r = rt.block_on(async { Ok::<_, String>((futures_lite_shim::try_list_sized(&*store, &cfg.key("log")).await?, futures_lite_shim::try_list_sized(&*store, &cfg.key("snap")).await?)) });
+            match r { Ok(v) => { st2.contact(); st2.resumed.store(true, Ordering::Relaxed); break v; } Err(e) => { st2.fail(format!("reading the bucket: {e}")); if !backoff(&st2, &stop2, &cfg) { return; } } }
+        };
+        for (k, _) in log_keys { if let Some((seg, off, len, _, _)) = parse_chunk(k.as_ref()) { let e = existing.entry(seg).or_insert(0); *e = (*e).max(off + len); } }
         if let Some((&seg, &done)) = existing.iter().max_by_key(|(s, _)| **s) {
             // the last complete record already in the bucket for the newest segment
             if let Ok(mut f) = File::open(GLog::seg_path_in(&dir, seg)) { let mut buf = vec![0u8; done as usize]; if f.read_exact(&mut buf).is_ok() { let (recs, _) = parse_glog(&buf); if let Some(r) = recs.last() { st2.cloud_seq.store(r.0, Ordering::Relaxed); log.notify_cloud(r.0); } } }
             cur = Some((seg, done));
         }
-        for (k, _) in rt.block_on(futures_lite_shim::collect_list_sized(&*store, &cfg.key("snap"))) { if let Ok(s0) = k.as_ref().rsplit('/').next().unwrap_or("").trim_end_matches(".enc").trim_end_matches(".zst").parse::<u64>() { last_snap = Some(last_snap.unwrap_or(0).max(s0)); } }
+        for (k, _) in snap_keys { if let Ok(s0) = k.as_ref().rsplit('/').next().unwrap_or("").trim_end_matches(".enc").trim_end_matches(".zst").parse::<u64>() { last_snap = Some(last_snap.unwrap_or(0).max(s0)); } }
         let mut last_compact = Instant::now();
         loop {
             // wait for the interval or a kick
-            { let (m, cv) = &*kick2; let k = m.lock().unwrap(); let mut k = if !*k { cv.wait_timeout(k, cfg.interval).unwrap().0 } else { k }; *k = false; }
-            if stop2.load(Ordering::Relaxed) && log.st.lock().unwrap().written <= st2.cloud_seq.load(Ordering::Relaxed) { return; }
+            if st2.failures.load(Ordering::Relaxed) > 0 { if !backoff(&st2, &stop2, &cfg) { return; } }
+            else { let (m, cv) = &*kick2; let k = m.lock().unwrap(); let mut k = if !*k { cv.wait_timeout(k, cfg.interval).unwrap().0 } else { k }; *k = false; }
+            // stopping: finish what can be finished; while the bucket is failing, give up (the next start resumes from the bucket)
+            if stop2.load(Ordering::Relaxed) && (log.st.lock().unwrap().written <= st2.cloud_seq.load(Ordering::Relaxed) || st2.failures.load(Ordering::Relaxed) > 0) { return; }
+            let step = (|| -> Result<(), String> {
             // 1. snapshot: upload if a newer one exists
             if let Ok(mut f) = File::open(dir.join("snap")) {
                 let mut h = [0u8; 24]; if f.read_exact(&mut h).is_ok() && u64::from_le_bytes(h[..8].try_into().unwrap()) == SNAP_MAGIC {
@@ -101,7 +167,8 @@ pub fn start_uploader(cfg: CloudConfig, dir: PathBuf, log: Arc<GLog>) -> Uploade
                         let mut data = Vec::new(); f.seek(SeekFrom::Start(0)).unwrap(); f.read_to_end(&mut data).unwrap();
                         let raw = data.len() as u64; let tc = Instant::now(); let data = pack(&data, &cfg); st2.compress_ms.fetch_add(tc.elapsed().as_millis() as u64, Ordering::Relaxed); let n = data.len() as u64; let t = Instant::now();
                         // multipart upload in 8 MB parts (snapshots can exceed what one PUT may carry)
-                        rt.block_on(async { let mut w = object_store::WriteMultipart::new_with_chunk_size(store.put_multipart(&cfg.key(&format!("snap/{s0:020}{}", cfg.suffix()))).await.unwrap(), 8 << 20); w.write(&data); w.finish().await.unwrap(); });
+                        rt.block_on(async { let mut w = object_store::WriteMultipart::new_with_chunk_size(store.put_multipart(&cfg.key(&format!("snap/{s0:020}{}", cfg.suffix()))).await.map_err(|e| format!("uploading the snapshot: {e}"))?, 8 << 20); w.write(&data); w.finish().await.map_err(|e| format!("uploading the snapshot: {e}"))?; Ok::<(), String>(()) })?;
+                        st2.uploaded();
                         st2.parts.fetch_add((n as usize).div_ceil(8 << 20) as u64, Ordering::Relaxed);
                         st2.puts.fetch_add(1, Ordering::Relaxed); st2.bytes.fetch_add(n, Ordering::Relaxed); st2.raw_bytes.fetch_add(raw, Ordering::Relaxed); st2.snapshots.fetch_add(1, Ordering::Relaxed); st2.last_put_ms.store(t.elapsed().as_millis() as u64, Ordering::Relaxed); last_snap = Some(s0);
                         // everything below the snapshot's low water is covered by it
@@ -131,7 +198,8 @@ pub fn start_uploader(cfg: CloudConfig, dir: PathBuf, log: Arc<GLog>) -> Uploade
                     break;
                 }
                 let last = recs.last().map(|r| r.0).unwrap_or(want - 1); let tc = Instant::now(); let body = pack(&buf[..complete], &cfg); st2.compress_ms.fetch_add(tc.elapsed().as_micros() as u64, Ordering::Relaxed); let t = Instant::now(); if !cfg.rtt.is_zero() { std::thread::sleep(cfg.rtt); }
-                let n = body.len() as u64; rt.block_on(store.put(&cfg.key(&chunk_key(seg, done, complete as u64, &cfg.suffix())), PutPayload::from(body))).unwrap();
+                let n = body.len() as u64; rt.block_on(store.put(&cfg.key(&chunk_key(seg, done, complete as u64, &cfg.suffix())), PutPayload::from(body))).map_err(|e| format!("uploading the log: {e}"))?;
+                st2.uploaded();
                 st2.puts.fetch_add(1, Ordering::Relaxed); st2.bytes.fetch_add(n, Ordering::Relaxed); st2.raw_bytes.fetch_add(complete as u64, Ordering::Relaxed); st2.last_put_ms.store(t.elapsed().as_millis() as u64, Ordering::Relaxed);
                 cur = Some((seg, done + complete as u64)); st2.cloud_seq.store(last, Ordering::Relaxed); log.notify_cloud(last);
                 if last >= written { break; }
@@ -163,6 +231,9 @@ pub fn start_uploader(cfg: CloudConfig, dir: PathBuf, log: Arc<GLog>) -> Uploade
                     }
                 }
             }
+            Ok(())
+            })();
+            if let Err(e) = step { st2.fail(e); }
         }
     });
     Uploader { stats, stop, thread: Some(h), kick }
@@ -173,6 +244,13 @@ mod futures_lite_shim {
     use object_store::{path::Path, ObjectStore};
     pub async fn collect_list(store: &dyn ObjectStore, prefix: &Path) -> Vec<Path> { collect_list_sized(store, prefix).await.into_iter().map(|(p, _)| p).collect() }
     pub async fn collect_list_sized(store: &dyn ObjectStore, prefix: &Path) -> Vec<(Path, u64)> { collect_list_meta(store, prefix).await.into_iter().map(|(p, s, _)| (p, s)).collect() }
+    /// Like `collect_list_sized`, but an error from the bucket is an error, not an empty listing.
+    pub async fn try_list_sized(store: &dyn ObjectStore, prefix: &Path) -> Result<Vec<(Path, u64)>, String> {
+        use futures_util::StreamExt;
+        let mut s = store.list(Some(prefix)); let mut out = vec![];
+        while let Some(r) = s.next().await { let m = r.map_err(|e| e.to_string())?; out.push((m.location, m.size)); }
+        out.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref())); Ok(out)
+    }
     /// (key, size, age since last modification)
     pub async fn collect_list_meta(store: &dyn ObjectStore, prefix: &Path) -> Vec<(Path, u64, std::time::Duration)> {
         use futures_util::StreamExt;
@@ -251,4 +329,29 @@ pub fn start_puller(cfg: CloudConfig, dir: PathBuf, poll: Duration) -> BucketPul
         }
     });
     BucketPuller { pulled, chunks, stop, thread: Some(h) }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    #[test] fn backup_health_moves_through_its_states() {
+        let st = CloudStats::default();
+        assert_eq!(st.state(), "connecting");
+        st.fail("reading the bucket: refused".into()); assert_eq!(st.state(), "retrying");
+        st.contact(); st.resumed.store(true, Ordering::Relaxed); assert_eq!(st.state(), "healthy");
+        for _ in 0..3 { st.fail("uploading the log: timeout".into()); }
+        assert_eq!(st.state(), "failing"); assert_eq!(st.failures.load(Ordering::Relaxed), 3); assert_eq!(st.last_error(), "uploading the log: timeout");
+        st.uploaded(); assert_eq!(st.state(), "healthy");
+        assert_eq!(st.failures_total.load(Ordering::Relaxed), 4, "the total survives recovery");
+        assert!(st.upload_at_ms.load(Ordering::Relaxed) >= st.err_at_ms.load(Ordering::Relaxed));
+        st.fail("x".repeat(5000)); assert_eq!(st.last_error().len(), 600, "long errors are cut");
+    }
+    #[test] fn a_bad_endpoint_is_an_error_not_a_panic() {
+        // the client accepts any endpoint text and fails on the first request: the probe reports it, nothing panics
+        let mut c = CloudConfig::local("b", "p"); c.endpoint = "not a url".into();
+        assert!(c.try_store(0).is_err());
+        let steps = probe(&c); assert_eq!(steps.len(), 1); assert_eq!(steps[0].0, "connect"); assert!(steps[0].3.contains("https://"), "{steps:?}");
+        for good in ["https://s3.eu-central-1.amazonaws.com", "http://127.0.0.1:9000", "https://acct.r2.cloudflarestorage.com/"] { assert!(check_endpoint(good).is_ok(), "{good}"); }
+        for bad in ["s3.amazonaws.com", "https://", "http:// spaces", "ftp://x"] { assert!(check_endpoint(bad).is_err(), "{bad}"); }
+    }
 }

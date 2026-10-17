@@ -1,6 +1,6 @@
 {
   "name": "sqweezdb",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Embedded SQL database with many writers, enforced types, row policies and live subscriptions",
   "main": "index.js",
   "types": "index.d.ts",

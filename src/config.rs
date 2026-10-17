@@ -185,6 +185,7 @@ impl ConfigFile {
 }
 fn resolve_backup(b: BackupFile, key: &str) -> Result<Backup, String> {
     let need = |v: Option<String>, k: &str| v.filter(|s| !s.is_empty()).ok_or_else(|| format!("{key}.{k} is required"));
+    if let Some(e) = b.endpoint.as_deref().filter(|e| !e.is_empty()) { crate::cloud::check_endpoint(e).map_err(|m| format!("{key}.{m}"))?; }
     let d = crate::cloud::CloudConfig::local("", "");
     Ok(Backup {
         endpoint: need(b.endpoint, "endpoint")?, bucket: need(b.bucket, "bucket")?, prefix: b.prefix.unwrap_or_default(), region: b.region.unwrap_or_else(|| "us-east-1".into()),

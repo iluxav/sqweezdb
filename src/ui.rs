@@ -115,6 +115,7 @@ fn serve(weak: std::sync::Weak<Sql>, stream: TcpStream, token: &str) -> std::io:
                         ("GET", "/api/tables") => json_resp(&mut w, 200, &api_tables(&sql))?,
                         ("GET", "/api/status") => json_resp(&mut w, 200, &api_status(&sql))?,
                         ("GET", "/api/acl") => json_resp(&mut w, 200, &api_acl(&sql))?,
+                        ("POST", "/api/backup/test") => json_resp(&mut w, 200, &api_backup_test(&sql))?,
                         ("POST", "/api/snapshot") => { let st = sql.snapshot(); json_resp(&mut w, 200, &json!({"rows": st.rows, "bytes": st.bytes, "secs": st.secs, "deletedSegments": st.deleted_segments}))? }
                         ("GET", "/api/live") => { drop(sql); return stream_events(&weak, &sess, &req, w, false) }
                         ("GET", "/api/changes") => { drop(sql); return stream_events(&weak, &sess, &req, w, true) }
@@ -128,6 +129,12 @@ fn serve(weak: std::sync::Weak<Sql>, stream: TcpStream, token: &str) -> std::io:
     }
 }
 
+/// Check the configured bucket the way the uploader uses it (list, write, delete), step by step.
+fn api_backup_test(sql: &Sql) -> J {
+    let Some(b) = sql.cfg.backup.as_ref() else { return json!({"error": "backup is not configured", "code": "CONFIG"}) };
+    let steps = crate::cloud::probe(&b.cloud());
+    json!({ "ok": steps.iter().all(|s| s.1) && steps.len() == 3, "steps": steps.iter().map(|(name, ok, ms, err)| json!({"step": name, "ok": ok, "ms": ms, "error": if err.is_empty() { J::Null } else { json!(err) }})).collect::<Vec<_>>() })
+}
 fn err_json(e: String) -> J { json!({"error": e, "code": crate::sql::error_code(&e)}) }
 fn j_to_value(v: &J) -> Value { match v { J::Null => Value::Null, J::Bool(b) => Value::Bool(*b), J::Number(n) => match n.as_i64() { Some(i) => Value::Int(i), None => Value::Float(n.as_f64().unwrap_or(0.0)) }, J::String(s) => Value::Text(s.clone()), other => Value::Text(other.to_string()) } }
 fn value_json(v: &Value, ty: Option<&ColType>) -> J {
@@ -167,7 +174,17 @@ fn api_status(sql: &Sql) -> J {
     use crate::config::Durability;
     let (seq, durable, bytes) = { let s = sql.db.log.st.lock().unwrap(); (s.seq, s.durable, s.bytes) };
     let cfg = &sql.cfg;
-    let backup = sql.backup_stats().map(|st| json!({ "bucket": cfg.backup.as_ref().map(|b| format!("{}/{}", b.bucket, b.prefix.trim_matches('/'))), "endpoint": cfg.backup.as_ref().map(|b| b.endpoint.clone()), "objects": st.puts.load(Relaxed), "bytes": st.bytes.load(Relaxed), "cloudSeq": st.cloud_seq.load(Relaxed), "behind": seq.saturating_sub(st.cloud_seq.load(Relaxed)), "snapshots": st.snapshots.load(Relaxed), "encrypted": cfg.backup.as_ref().map(|b| b.passphrase.is_some()).unwrap_or(false) }));
+    let backup = sql.backup_stats().map(|st| {
+        let b = cfg.backup.as_ref(); let ms = |v: u64| if v == 0 { J::Null } else { json!(v) };
+        let e = st.last_error(); let last_error = if e.is_empty() { J::Null } else { json!(e) };
+        json!({ "bucket": b.map(|b| format!("{}/{}", b.bucket, b.prefix.trim_matches('/'))), "bucketName": b.map(|b| b.bucket.clone()), "prefix": b.map(|b| b.prefix.clone()),
+            "endpoint": b.map(|b| b.endpoint.clone()), "region": b.map(|b| b.region.clone()), "encrypted": b.map(|b| b.passphrase.is_some()).unwrap_or(false), "compress": b.map(|b| b.compress).unwrap_or(true),
+            "intervalMs": b.map(|b| b.interval.as_millis() as u64), "compactAfterMs": b.map(|b| b.compact_after.as_millis() as u64), "cloudDurable": matches!(cfg.durable, Durability::Cloud),
+            "objects": st.puts.load(Relaxed), "bytes": st.bytes.load(Relaxed), "rawBytes": st.raw_bytes.load(Relaxed), "snapshots": st.snapshots.load(Relaxed), "merges": st.merges.load(Relaxed), "deletes": st.deletes.load(Relaxed),
+            "cloudSeq": st.cloud_seq.load(Relaxed), "behind": seq.saturating_sub(st.cloud_seq.load(Relaxed)),
+            "state": st.state(), "resumed": st.resumed.load(Relaxed), "okAt": ms(st.ok_at_ms.load(Relaxed)), "uploadAt": ms(st.upload_at_ms.load(Relaxed)), "errorAt": ms(st.err_at_ms.load(Relaxed)),
+            "lastError": last_error, "failures": st.failures.load(Relaxed).min(1_000_000), "failuresTotal": st.failures_total.load(Relaxed), "now": crate::cloud::now_ms() })
+    });
     json!({ "dir": sql.db.dir.display().to_string(), "durable": match cfg.durable { Durability::Visible => "visible", Durability::Fsync => "fsync", Durability::Cloud => "cloud" }, "seq": seq, "durableSeq": durable, "logBytes": bytes,
             "snapshotsByPolicy": sql.snapshots_taken(), "snapshotPolicy": {"logBytes": cfg.snapshot.log_bytes, "idleAfterMs": cfg.snapshot.idle_after.map(|d| d.as_millis() as u64)},
             "altersInProgress": sql.db.tables_with_shadow().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
@@ -198,7 +215,8 @@ fn stream_events(weak: &std::sync::Weak<Sql>, sess: &Session, req: &Req, mut w: 
                          else { match sql.reactor().watch(sess, &text, &params) { Ok((s, rows)) => (s, Some(rows)), Err(e) => return json_resp(&mut w, 400, &err_json(e)) } };
     w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")?;
     let send = |w: &mut TcpStream, v: J| -> std::io::Result<()> { w.write_all(format!("data: {v}\n\n").as_bytes())?; w.flush() };
-    if let Some(rows) = initial { send(&mut w, json!({"type": "rows", "columns": names(&cols), "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "initial": true}))?; }
+    let types: Vec<Option<String>> = cols.iter().map(|(_, t)| t.as_ref().map(|t| t.name())).collect();
+    if let Some(rows) = initial { send(&mut w, json!({"type": "rows", "columns": names(&cols), "types": types, "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "initial": true}))?; }
     drop(sql);   // a stream must not keep the database open
     let mut table_cols: HashMap<String, Cols> = HashMap::new(); let mut quiet = Instant::now();
     loop {
@@ -206,7 +224,7 @@ fn stream_events(weak: &std::sync::Weak<Sql>, sess: &Session, req: &Req, mut w: 
         if weak.strong_count() == 0 { return Ok(()); }
         if ev.is_some() { quiet = Instant::now(); }
         match ev {
-            Some(Event::Live { seq, rows, added, removed }) => send(&mut w, json!({"type": "rows", "seq": seq, "columns": names(&cols), "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "added": added.len(), "removed": removed.len()}))?,
+            Some(Event::Live { seq, rows, added, removed }) => send(&mut w, json!({"type": "rows", "seq": seq, "columns": names(&cols), "types": types, "rows": rows.iter().map(|r| row_json(&cols, r)).collect::<Vec<_>>(), "added": added.len(), "removed": removed.len()}))?,
             Some(Event::Change(c)) => {
                 let tc = table_cols.entry(c.table.clone()).or_insert_with(|| weak.upgrade().and_then(|s| s.db.table(&c.table)).map(|t| t.schema.columns.iter().map(|col| (col.name.clone(), Some(col.ty.clone()))).collect()).unwrap_or_default());
                 send(&mut w, json!({"type": "change", "op": match c.op { ChangeOp::Insert => "insert", ChangeOp::Update => "update", ChangeOp::Delete => "delete" }, "table": c.table, "key": value_json(&c.pk, None), "seq": c.seq, "columns": names(tc), "row": c.row.as_ref().map(|r| row_json(tc, r))}))?
