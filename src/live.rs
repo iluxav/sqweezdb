@@ -43,7 +43,7 @@ impl State {
 /// it alive forever after the first subscription (E44).
 pub struct Reactor { sql: std::sync::Weak<Sql>, log: Arc<crate::table::GLog>, state: Arc<Mutex<State>>, pub debounce: Duration, pub reruns: AtomicU64, pub rerun_us: AtomicU64, pub events: AtomicU64, pub last_seq: AtomicU64, stop: Arc<AtomicBool>, thread: Mutex<Option<std::thread::JoinHandle<()>>> }
 
-fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), last_seq: 0, last_insert_id: 0, last_insert_key: None } }
+fn session_like(s: &Session) -> Session { Session { txn: None, user: s.user.clone(), roles: s.roles.clone(), attrs: s.attrs.clone(), assumed: s.assumed, last_seq: 0, last_insert_id: 0, last_insert_key: None } }
 /// The predicates a single-table plan applies, including the ones hidden in its access path.
 fn plan_preds(sql: &Sql, sess: &Session, sp: &SelectPlan, params: &[Value]) -> Result<Vec<CPred>, String> {
     let mut preds: Vec<Pred> = sp.preds.clone(); let sch = &sp.table.schema;

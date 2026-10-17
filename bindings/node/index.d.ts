@@ -3,6 +3,11 @@ export type Value = number | bigint | string | boolean | Buffer | Date | null;
 export type Row = Record<string, Value>;
 export type Params = Value[] | Value;
 
+/** Who a handle acts as when the app vouches for it: `role` or `roles` name existing roles; every other key is a
+ *  session attribute (number, string, boolean, BigInt or Date), read by row policies as SESSION.<key>. */
+export type IdentityInput = ({ role: string; roles?: never } | { roles: string[]; role?: never }) & { [attribute: string]: unknown };
+export interface Identity { readonly roles: readonly string[]; readonly [attribute: string]: unknown }
+
 export interface RunResult {
   /** Rows written (DELETE reports the count; INSERT and UPDATE report 1, or 0 when the row was not there). */
   changes: number;
@@ -46,7 +51,10 @@ export class Statement {
 export class Database {
   readonly path: string;
   readonly durable: boolean;
+  /** The database user this handle acts as (`as('alice')`), or null. */
   readonly user: string | null;
+  /** The identity this handle acts as (`as({ role, ...attributes })`), or null. */
+  readonly identity: Identity | null;
   /** Transactions retried because another writer got there first. */
   retries: number;
   readonly rowCount: number;
@@ -61,7 +69,11 @@ export class Database {
   transaction<A extends unknown[], R>(fn: (tx: Database, ...args: A) => R, opts?: { retries?: number }): (...args: A) => R;
   subscribe(sql: string, params?: Params): Subscription;
   watch(sql: string, params: Params | undefined, fn: (rows: Row[] | null, info: WatchInfo) => void): Watch;
+  /** Act as a user created in the database: their roles and attributes apply to every call. */
   as(user: string): Database;
+  /** Act as an identity your app vouches for after its own login: existing roles, plus attributes that row policies
+   *  read as SESSION.<name>. Nothing is stored; cheap enough per request. */
+  as(identity: IdentityInput): Database;
   close(): void;
 }
 

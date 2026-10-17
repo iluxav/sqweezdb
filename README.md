@@ -23,8 +23,9 @@ in your process and a directory on disk. No server to run, unless you want one.
   `DEFAULT uuid()` gives time-ordered UUIDs (version 7), `gen_random_uuid()` random ones, `DEFAULT now()`
   the insert time. A UUID can be the primary key: `id UUID PRIMARY KEY DEFAULT uuid()`.
   `INSERT … RETURNING` and `lastInsertId` give the new values back.
-- **Access control in the engine.** Roles, users, per-table grants and row policies compiled into
-  every query and every subscription. A tenant cannot see another tenant's rows, or their changes.
+- **Access control in the engine.** Roles, per-table grants and row policies compiled into every
+  query and every subscription. Your app says who is asking, per request: `db.as({ role: 'customer',
+  tenant: 42 })`. A tenant cannot see another tenant's rows, or their changes.
 - **Online schema changes.** `ALTER TABLE` adds, drops, renames or retypes a column while readers and
   writers keep running. The statement returns when the change is in place, or with an error and nothing
   changed (a value that does not convert to the new type, for example). Prepared statements re-plan themselves.
@@ -95,7 +96,7 @@ for await (const ev of db.subscribe('SELECT * FROM orders WHERE user_id = ?', [4
 db.watch('SELECT user_id, sum(amount) AS total FROM orders GROUP BY user_id',
          [], (rows, info) => render(rows))
 
-const alice = db.as('alice')          // same calls, alice's grants and row policies applied
+const mine = db.as({ role: 'customer', tenant: 42 })   // after your own login: the role's grants and row policies apply
 ```
 
 Calls are synchronous, like better-sqlite3 and `node:sqlite`, because a read answers in about a
@@ -383,6 +384,45 @@ and more time per operation. Measured in E48, with 1 million rows per table:
 Use `INT` when ids stay inside your system and speed matters most. Use `UUID` when ids are shown to
 users, appear in URLs, or are created by clients before they reach the database. Either way, checking
 who may read a row protects it; an id that is hard to guess does not.
+
+## Access control
+
+The rules live in the database: roles, what each role may do to each table, and which rows it may
+touch. Who is asking comes from your app, which has already checked the login.
+
+```sql
+CREATE ROLE customer;
+GRANT SELECT, INSERT ON orders TO customer;
+CREATE POLICY own_orders ON orders FOR ALL TO customer USING (tenant_id = SESSION.tenant);
+```
+
+```js
+app.get('/orders', (req, res) => {
+  const tenantDb = db.as({ role: 'customer', tenant: req.user.tenantId })   // per request, after your login check
+  res.json(tenantDb.all('SELECT * FROM orders'))                           // only this tenant's rows
+})
+```
+
+`role`, or `roles` as a list, names existing roles. Every other key is a session attribute that
+policies read as `SESSION.<key>`: a number, a string (a UUID as its text), a boolean, a `BigInt` or a
+`Date`. Nothing about the user is stored in the database.
+
+- Reads, writes, subscriptions and live queries are all filtered. A write outside the policy fails
+  with `DENIED`, and asking for another tenant's row by its id returns nothing.
+- Every policy that matches one of the session's roles applies, all of them together.
+- A missing attribute is an error, not an empty result: `policy own_orders needs session attribute
+  tenant`. So is an unknown role, or an attribute that is `undefined`.
+- An identity can never change the schema, roles, grants or policies. Only the app's own handle can.
+- Creating an identity costs about 1.4 µs in Node and the policy adds about 0.1 µs to a point read
+  (E49), so one per request is fine.
+
+Python: `s = db.session(); s.assume("customer", tenant=42)`. Go:
+`s := db.Session(); s.Assume([]string{"customer"}, map[string]any{"tenant": 42})`.
+
+Users can also be stored in the database, with `CREATE USER alice IN ROLE customer WITH tenant = 7`
+and `db.as('alice')`. A client of the TCP listener picks such a user by name after presenting the
+listener's token; per-user passwords are not built yet. A network client can never supply its own
+attributes.
 
 ## How it works, briefly
 

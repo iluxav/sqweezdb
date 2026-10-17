@@ -122,6 +122,11 @@ pub fn open(path: String, options: Option<String>) -> Result<Db> {
 #[napi] impl Sess {
     fn sql(&self) -> Result<Arc<Sql>> { self.sql.upgrade().ok_or_else(|| err_code("CLOSED", "database is closed")) }
     #[napi] pub fn login(&self, user: String) -> Result<()> { self.sql()?.login(&mut self.s.lock().unwrap(), &user).map_err(err) }
+    /// An identity the app vouches for: roles, and session attributes as parallel keys and values.
+    #[napi] pub fn assume(&self, roles: Vec<String>, keys: Vec<String>, values: Vec<JsUnknown>) -> Result<()> {
+        let attrs = keys.into_iter().zip(params(values)?).collect();
+        self.sql()?.assume(&mut self.s.lock().unwrap(), &roles, attrs).map_err(err)
+    }
     #[napi] pub fn in_txn(&self) -> bool { self.s.lock().unwrap().txn.is_some() }
     #[napi] pub fn last_seq(&self) -> f64 { self.s.lock().unwrap().last_seq as f64 }
     /// The key of the last inserted row: a number, or a UUID string for UUID-keyed tables.

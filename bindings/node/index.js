@@ -100,7 +100,7 @@ class Subscription {
 class Database {
   constructor(handle, sess, info) {
     this._db = handle; this._sess = sess; this._stmts = info.stmts || new Map();
-    this.path = info.path; this.durable = info.durable; this.user = info.user || null; this.retries = 0;
+    this.path = info.path; this.durable = info.durable; this.user = info.user || null; this.identity = info.identity || null; this.retries = 0;
     /** How rows become objects: 'auto' (default: one row built in the addon, many rows as a packed frame decoded in JS), 'native' or 'packed'. */
     this.rowMode = info.rowMode || 'auto';
   }
@@ -162,10 +162,28 @@ class Database {
     const rows = sub.initial(); fn(rows, { added: rows, removed: [], initial: true });
     return { close: () => sub.close(), unref: () => sub.unref() };
   }
-  /** The same database as `user`: their grants and row policies apply to every call, including subscriptions. */
-  as(user) {
-    let sess; try { sess = this._db.session(); sess.login(user); } catch (e) { throw wrap(e); }
-    return new Database(this._db, sess, { path: this.path, durable: this.durable, user, stmts: this._stmts, rowMode: this.rowMode });
+  /**
+   * The same database as someone else; their grants and row policies apply to every call, including subscriptions.
+   * - `as('alice')`: a user created in the database (CREATE USER alice IN ROLE ... WITH tenant = 1).
+   * - `as({ role: 'customer', tenant: 42 })`: an identity your app vouches for after its own login. `role` (or `roles`,
+   *   an array) names existing roles; every other key is a session attribute that policies read as SESSION.<key>.
+   *   Nothing is stored in the database. Cheap enough to call once per request.
+   */
+  as(who) {
+    let sess, user = null, identity = null;
+    if (typeof who === 'string') user = who;
+    else if (who && typeof who === 'object' && !Array.isArray(who)) {
+      const { role, roles, ...attrs } = who;
+      const list = roles !== undefined ? roles : role !== undefined ? [role] : [];
+      if (!Array.isArray(list) || list.some((r) => typeof r !== 'string')) throw new SqweezError('TYPE', "as(): 'role' is a role name and 'roles' an array of role names");
+      identity = Object.freeze({ roles: Object.freeze([...list]), ...attrs });
+    } else throw new SqweezError('TYPE', "as() takes a user name, or an identity such as { role: 'customer', tenant: 42 }");
+    try {
+      sess = this._db.session();
+      if (user !== null) sess.login(user);
+      else { const keys = Object.keys(identity).filter((k) => k !== 'roles'); sess.assume([...identity.roles], keys, keys.map((k) => identity[k])); }
+    } catch (e) { throw wrap(e); }
+    return new Database(this._db, sess, { path: this.path, durable: this.durable, user, identity, stmts: this._stmts, rowMode: this.rowMode });
   }
   /** Rows in all tables (from the engine's own count). */
   get rowCount() { return this._db.rows(); }

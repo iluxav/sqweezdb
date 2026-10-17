@@ -63,6 +63,16 @@ fn rows_to_py<'py>(py: Python<'py>, rows: Vec<Vec<Value>>) -> PyResult<Bound<'py
     /// Primary key of the last row this session inserted (an automatic id, or the one given); 0 before any insert.
     #[getter] fn last_insert_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> { match self.s.lock().unwrap().last_insert_key.clone() { Some(v) => to_py(py, &v), None => Ok(py.None().into_bound(py)) } }
     fn login(&self, user: &str) -> PyResult<()> { self.sql.login(&mut self.s.lock().unwrap(), user).map_err(pyo3::exceptions::PyPermissionError::new_err) }
+    /// Act as an identity your application vouches for after its own login: `roles` is a role name or a list of them,
+    /// keyword arguments are the session attributes row policies read (SESSION.tenant). Nothing is stored in the database.
+    /// `s = db.session(); s.assume("customer", tenant=42)`
+    #[pyo3(signature = (roles, **attrs))]
+    fn assume(&self, roles: &Bound<'_, PyAny>, attrs: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<()> {
+        let roles: Vec<String> = if let Ok(r) = roles.extract::<String>() { vec![r] } else { roles.extract::<Vec<String>>().map_err(|_| pyo3::exceptions::PyTypeError::new_err("roles: a role name or a list of role names"))? };
+        let mut map = std::collections::HashMap::new();
+        if let Some(d) = attrs { for (k, v) in d.iter() { map.insert(k.extract::<String>()?, to_value(&v)?); } }
+        self.sql.assume(&mut self.s.lock().unwrap(), &roles, map).map_err(pyo3::exceptions::PyPermissionError::new_err)
+    }
     /// Execute a prepared statement with a sequence of parameters; returns a list of tuples.
     #[pyo3(signature = (stmt, params = None))]
     fn execute<'py>(&self, py: Python<'py>, stmt: &PyStmt, params: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyList>> {

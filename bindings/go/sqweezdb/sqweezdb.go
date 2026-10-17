@@ -8,7 +8,7 @@ package sqweezdb
 typedef struct Db Db; typedef struct Stmt Stmt; typedef struct Sess Sess; typedef struct Rows Rows;
 typedef struct { int tag; long long i; double f; const unsigned char* ptr; size_t len; } CValue;
 Db* sqweezdb_open(const char* path, int durable); long long sqweezdb_last_insert_id(Sess*); Db* sqweezdb_open_with(const char* path, const char* json); const char* sqweezdb_open_error(); void sqweezdb_close(Db*); const char* sqweezdb_last_error(Db*);
-Sess* sqweezdb_session(Db*); void sqweezdb_session_free(Sess*); int sqweezdb_login(Db*, Sess*, const char*);
+Sess* sqweezdb_session(Db*); void sqweezdb_session_free(Sess*); int sqweezdb_login(Db*, Sess*, const char*); int sqweezdb_assume(Db*, Sess*, const char*);
 Stmt* sqweezdb_prepare(Db*, const char*); void sqweezdb_finalize(Stmt*);
 Rows* sqweezdb_exec(Db*, Sess*, Stmt*, const CValue*, int); Rows* sqweezdb_exec_text(Db*, Sess*, const char*, const CValue*, int);
 int sqweezdb_rows_count(Rows*); int sqweezdb_rows_cols(Rows*); int sqweezdb_rows_get(Rows*, int, int, CValue*); int sqweezdb_rows_all(Rows*, CValue*, int); void sqweezdb_rows_free(Rows*);
@@ -122,6 +122,24 @@ func (s *Session) Login(user string) error {
 	cu := C.CString(user)
 	defer C.free(unsafe.Pointer(cu))
 	if C.sqweezdb_login(s.db.p, s.p, cu) != 0 {
+		return s.db.lastError()
+	}
+	return nil
+}
+
+// Assume binds the session to an identity your application vouches for, after its own login: the roles, and the
+// attributes row policies read (USING (tenant_id = SESSION.tenant)). Nothing about the user is stored in the database.
+// Attribute values are numbers, strings (a UUID as its text) or booleans.
+//
+//	s := db.Session(); s.Assume([]string{"customer"}, map[string]any{"tenant": 42})
+func (s *Session) Assume(roles []string, attrs map[string]any) error {
+	b, err := json.Marshal(map[string]any{"roles": roles, "attrs": attrs})
+	if err != nil {
+		return err
+	}
+	cj := C.CString(string(b))
+	defer C.free(unsafe.Pointer(cj))
+	if C.sqweezdb_assume(s.db.p, s.p, cj) != 0 {
 		return s.db.lastError()
 	}
 	return nil

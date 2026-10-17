@@ -1,0 +1,8 @@
+=== E49: app-supplied identities (Node, 100000 rows, 1000 tenants, 200000 ops x 5 rounds, medians) ===
+app handle, point read (no policy)                                       0.889 us/op  (min 0.881, max 0.973)
+identity handle reused, point read with the policy                       1.017 us/op  (min 1.005, max 1.020)
+database user handle reused (as("alice")), same read                     1.012 us/op  (min 0.992, max 1.033)
+new identity per request: db.as({ role, tenant }) + point read           2.644 us/op  (min 2.640, max 2.791)
+new database-user handle per request: db.as("alice") + point read        1.995 us/op  (min 1.935, max 2.166)
+db.as({ role, tenant }) alone                                            1.410 us/op  (min 1.369, max 1.568)
+checks: 0 rows from the wrong tenant; 0 rows of other tenants visible to tenant 7 (of 20000 tries)

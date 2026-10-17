@@ -40,6 +40,9 @@ static OPEN_ERR: std::sync::Mutex<Option<CString>> = std::sync::Mutex::new(None)
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_session_free(s: *mut Sess) { if !s.is_null() { drop(unsafe { Box::from_raw(s) }); } }
 /// Bind a session to a user (access control). 0 on success.
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_login(db: *mut Db, s: *mut Sess, user: *const c_char) -> c_int { let (db, s) = unsafe { (&*db, &mut *s) }; match db.sql.login(&mut s.s, &unsafe { cstr(user) }) { Ok(()) => 0, Err(e) => { set_err(db, e); 1 } } }
+/// Bind a session to an identity the application vouches for (its own login decided who is asking), given as JSON:
+/// {"roles": ["customer"], "attrs": {"tenant": 42}}. Row policies read the attributes; no user is stored. 0 on success.
+#[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_assume(db: *mut Db, s: *mut Sess, json: *const c_char) -> c_int { let (db, s) = unsafe { (&*db, &mut *s) }; match db.sql.assume_json(&mut s.s, &unsafe { cstr(json) }) { Ok(()) => 0, Err(e) => { set_err(db, e); 1 } } }
 /// Prepare a statement; null on error (see sqweezdb_last_error).
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_prepare(db: *mut Db, sql: *const c_char) -> *mut Stmt { let db = unsafe { &*db }; match db.sql.prepare(&unsafe { cstr(sql) }) { Ok(p) => Box::into_raw(Box::new(Stmt { p })), Err(e) => { set_err(db, e); std::ptr::null_mut() } } }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn sqweezdb_finalize(st: *mut Stmt) { if !st.is_null() { drop(unsafe { Box::from_raw(st) }); } }

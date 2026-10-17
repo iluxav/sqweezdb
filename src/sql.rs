@@ -26,7 +26,9 @@ pub struct SelectPlan { pub table: Arc<Table>, pub schema: Schema, pub access: A
 pub enum Plan { CreateTable(Schema), Insert { table: Arc<Table>, rows: Vec<Vec<Expr>>, returning: Option<Vec<usize>> }, Select(SelectPlan), Update { table: Arc<Table>, sets: Vec<(usize, Expr)>, pk: Expr }, Delete { table: Arc<Table>, access: Access, preds: Vec<Pred> }, Begin, Commit, Rollback, Alter { table: String, ops: Vec<AlterOp> } }
 #[derive(Clone, Debug)] pub enum AlterOp { Add { col: Column, default: Value }, Drop(String), Rename(String, String), SetType(String, ColType), SetNotNull(String), DropNotNull(String) }
 pub struct Prepared { pub plan: Plan, pub nparams: usize, pub text: String, pub epoch: u64 }
-#[derive(Default)] pub struct Session { pub txn: Option<Txn>, pub user: Option<String>, pub roles: Vec<String>, pub attrs: HashMap<String, Value>, /// sequence of this session's last commit (autocommit or COMMIT); `Sql::wait_durable` makes it durable
+#[derive(Default)] pub struct Session { pub txn: Option<Txn>, pub user: Option<String>, pub roles: Vec<String>, pub attrs: HashMap<String, Value>,
+    /// true when the identity came from the application (`assume`), not from a user stored in the database
+    pub assumed: bool, /// sequence of this session's last commit (autocommit or COMMIT); `Sql::wait_durable` makes it durable
     pub last_seq: u64,
     /// primary key of the last row this session inserted (0 before any insert)
     pub last_insert_id: i64,
@@ -1047,7 +1049,29 @@ impl Sql {
     pub fn login(&self, sess: &mut Session, user: &str) -> Result<(), String> {
         let acl = self.acl.read().unwrap();
         let u = acl.users.get(user).ok_or(format!("no such user {user}"))?;
-        sess.user = Some(user.to_string()); sess.roles = u.roles.clone(); sess.attrs = u.attrs.clone(); Ok(())
+        sess.user = Some(user.to_string()); sess.roles = u.roles.clone(); sess.attrs = u.attrs.clone(); sess.assumed = false; Ok(())
+    }
+    /// `assume` with the identity as JSON: `{"roles": ["customer"], "attrs": {"tenant": 42}}`. Whole numbers become INT,
+    /// other numbers DOUBLE, strings TEXT (a UUID as its text), true/false BOOL.
+    pub fn assume_json(&self, sess: &mut Session, json: &str) -> Result<(), String> {
+        let j: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("identity: {e}"))?;
+        let roles: Vec<String> = match j.get("roles") { Some(serde_json::Value::Array(a)) => a.iter().map(|r| r.as_str().map(str::to_string).ok_or("identity: roles must be strings".to_string())).collect::<Result<_, _>>()?, Some(serde_json::Value::String(r)) => vec![r.clone()], None => vec![], _ => return Err("identity: roles must be a list of role names".into()) };
+        let mut attrs = HashMap::new();
+        match j.get("attrs") { None | Some(serde_json::Value::Null) => {}, Some(serde_json::Value::Object(m)) => for (k, v) in m { attrs.insert(k.clone(), match v {
+            serde_json::Value::Null => Value::Null, serde_json::Value::Bool(b) => Value::Bool(*b), serde_json::Value::String(s) => Value::Text(s.clone()),
+            serde_json::Value::Number(n) => match n.as_i64() { Some(i) => Value::Int(i), None => Value::Float(n.as_f64().unwrap_or(f64::NAN)) },
+            _ => return Err(format!("session attribute {k} must be a number, text or true/false")) }); }, _ => return Err("identity: attrs must be an object".into()) }
+        self.assume(sess, &roles, attrs)
+    }
+    /// Act as an identity the application vouches for: its own login decided who is asking, so it passes the roles and
+    /// the session attributes the row policies read (`SESSION.tenant`), and nothing about the user is stored here.
+    /// Only code holding the database can do this; the network listeners log in by user name only.
+    pub fn assume(&self, sess: &mut Session, roles: &[String], attrs: HashMap<String, Value>) -> Result<(), String> {
+        if sess.txn.is_some() { return Err("cannot change identity inside a transaction".into()); }
+        if roles.is_empty() { return Err("an identity needs at least one role".into()); }
+        { let acl = self.acl.read().unwrap(); if let Some(r) = roles.iter().find(|r| !acl.roles.contains(*r)) { return Err(format!("no such role {r}")); } }
+        if let Some(k) = attrs.iter().find(|(_, v)| **v == Value::Null).map(|(k, _)| k) { return Err(format!("session attribute {k} has no value")); }
+        sess.user = Some(roles.join(", ")); sess.roles = roles.to_vec(); sess.attrs = attrs; sess.assumed = true; Ok(())
     }
     fn admin(&self, sess: &Session, sql: &str) -> Result<(), String> {
         if sess.user.is_some() { return Err("permission denied: only the application session can manage roles, users and policies".into()); }
@@ -1113,7 +1137,8 @@ impl Sql {
         let acl = self.acl.read().unwrap();
         let tname = table.schema.name.to_lowercase();
         let allowed = sess.roles.iter().any(|r| acl.grants.get(&(r.clone(), tname.clone())).map(|m| m & cmd != 0).unwrap_or(false));
-        if !allowed { return Err(format!("permission denied: user {user} lacks {} on {}", match cmd { P_SELECT => "SELECT", P_INSERT => "INSERT", P_DELETE => "DELETE", _ => "UPDATE" }, table.schema.name)); }
+        let who = if !sess.assumed { format!("user {user}") } else if sess.roles.len() == 1 { format!("role {user}") } else { format!("roles {user}") };
+        if !allowed { return Err(format!("permission denied: {who} lacks {} on {}", match cmd { P_SELECT => "SELECT", P_INSERT => "INSERT", P_DELETE => "DELETE", _ => "UPDATE" }, table.schema.name)); }
         let mut out = vec![];
         for p in acl.policies.iter().filter(|p| p.table == tname && p.cmds & cmd != 0 && sess.roles.contains(&p.role)) {
             for (col, cmp, rhs) in &p.preds {
@@ -1801,6 +1826,71 @@ mod uuid_key_tests {
         assert!(qp(&s, "SELECT amt FROM o WHERE amt IN (SELECT lim FROM a WHERE a.id = o.aid)", &[]).unwrap_err().contains("not supported yet"));
         assert!(qp(&s, "SELECT name FROM a WHERE EXISTS (SELECT 1 FROM o WHERE o.amt = a.name)", &[]).unwrap_err().contains("unsupported correlation"));
         assert!(qp(&s, "SELECT name FROM a WHERE EXISTS (SELECT 1 FROM o WHERE o.amt = a.id)", &[]).unwrap_err().contains("unsupported correlation"));
+        drop(s); std::fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::config::Config;
+    fn rows(s: &Sql, sess: &mut Session, sql: &str) -> Vec<String> { s.exec_s(sess, sql, &[]).unwrap_or_else(|e| panic!("{sql}: {e}")).iter().map(|r| r.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(",")).collect() }
+    fn as_app(s: &Sql, sql: &str) { s.exec_s(&mut Session::default(), sql, &[]).unwrap_or_else(|e| panic!("{sql}: {e}")); }
+    fn attrs(kv: &[(&str, Value)]) -> HashMap<String, Value> { kv.iter().map(|(k, v)| (k.to_string(), v.clone())).collect() }
+    #[test] fn an_app_supplied_identity_gets_its_roles_and_attributes_and_nothing_more() {
+        let d = std::env::temp_dir().join(format!("sqweezdb-identity-{}", std::process::id())); let _ = std::fs::remove_dir_all(&d);
+        let s = Sql::open_with(&d, Config::default()).unwrap();
+        as_app(&s, "CREATE TABLE orders (id SERIAL PRIMARY KEY, tenant_id INT NOT NULL, item VARCHAR(32))");
+        as_app(&s, "INSERT INTO orders (tenant_id, item) VALUES (1, 'apples'), (1, 'pears'), (2, 'bolts')");
+        as_app(&s, "CREATE ROLE customer"); as_app(&s, "CREATE ROLE auditor");
+        as_app(&s, "GRANT SELECT, INSERT ON orders TO customer"); as_app(&s, "GRANT SELECT ON orders TO auditor");
+        as_app(&s, "CREATE POLICY own_orders ON orders FOR ALL TO customer USING (tenant_id = SESSION.tenant)");
+        let customer = |t: i64| { let mut x = Session::default(); s.assume(&mut x, &["customer".into()], attrs(&[("tenant", Value::Int(t))])).unwrap(); x };
+        // reads: each tenant its own rows, even asking by id
+        assert_eq!(rows(&s, &mut customer(1), "SELECT item FROM orders ORDER BY item"), vec!["Text(\"apples\")", "Text(\"pears\")"]);
+        assert_eq!(rows(&s, &mut customer(2), "SELECT item FROM orders"), vec!["Text(\"bolts\")"]);
+        assert!(rows(&s, &mut customer(1), "SELECT item FROM orders WHERE id = 3").is_empty());
+        // writes: inside the policy only
+        let mut c1 = customer(1);
+        s.exec_s(&mut c1, "INSERT INTO orders (tenant_id, item) VALUES (1, 'plums')", &[]).unwrap();
+        let e = s.exec_s(&mut c1, "INSERT INTO orders (tenant_id, item) VALUES (2, 'sneaky')", &[]).unwrap_err();
+        assert!(e.starts_with("permission denied") && e.contains("policy"), "{e}");
+        let e = s.exec_s(&mut c1, "DELETE FROM orders WHERE id = 1", &[]).unwrap_err();
+        assert_eq!(e, "permission denied: role customer lacks DELETE on orders");
+        // an identity is never the application: no schema or access changes
+        assert!(s.exec_s(&mut c1, "CREATE TABLE x (id INT PRIMARY KEY)", &[]).unwrap_err().starts_with("permission denied"));
+        assert!(s.exec_s(&mut c1, "CREATE ROLE boss", &[]).unwrap_err().starts_with("permission denied"));
+        // a role without a policy sees every row it is granted
+        let mut a = Session::default(); s.assume(&mut a, &["auditor".into()], HashMap::new()).unwrap();
+        assert_eq!(rows(&s, &mut a, "SELECT count(*) FROM orders"), vec!["Int(4)"]);
+        // refused: a missing attribute (fails closed), an unknown role, no role, an attribute without a value, mid-transaction
+        let mut none = Session::default(); s.assume(&mut none, &["customer".into()], HashMap::new()).unwrap();
+        assert_eq!(s.exec_s(&mut none, "SELECT * FROM orders", &[]).unwrap_err(), "policy own_orders needs session attribute tenant");
+        assert_eq!(s.assume(&mut Session::default(), &["admin".into()], HashMap::new()).unwrap_err(), "no such role admin");
+        assert_eq!(s.assume(&mut Session::default(), &[], HashMap::new()).unwrap_err(), "an identity needs at least one role");
+        assert_eq!(s.assume(&mut Session::default(), &["customer".into()], attrs(&[("tenant", Value::Null)])).unwrap_err(), "session attribute tenant has no value");
+        let mut t = customer(1); s.exec_s(&mut t, "BEGIN", &[]).unwrap();
+        assert_eq!(s.assume(&mut t, &["customer".into()], attrs(&[("tenant", Value::Int(2))])).unwrap_err(), "cannot change identity inside a transaction");
+        // the JSON form (C ABI, Go): numbers, text, booleans; a role as a string or a list
+        let mut j = Session::default(); s.assume_json(&mut j, r#"{"roles": "customer", "attrs": {"tenant": 2, "name": "bob", "vip": true, "score": 1.5}}"#).unwrap();
+        assert_eq!((j.attrs["tenant"].clone(), j.attrs["name"].clone(), j.attrs["vip"].clone(), j.attrs["score"].clone()), (Value::Int(2), Value::Text("bob".into()), Value::Bool(true), Value::Float(1.5)));
+        assert_eq!(rows(&s, &mut j, "SELECT item FROM orders"), vec!["Text(\"bolts\")"]);
+        assert!(s.assume_json(&mut Session::default(), r#"{"roles": ["customer"], "attrs": {"tenant": [1]}}"#).unwrap_err().contains("must be a number, text or true/false"));
+        assert_eq!(s.assume_json(&mut Session::default(), r#"{"roles": ["nobody"]}"#).unwrap_err(), "no such role nobody");
+        drop(s); std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test] fn a_uuid_attribute_scopes_a_uuid_keyed_table() {
+        let d = std::env::temp_dir().join(format!("sqweezdb-identity-uuid-{}", std::process::id())); let _ = std::fs::remove_dir_all(&d);
+        let s = Sql::open_with(&d, Config::default()).unwrap();
+        let (a, b) = ("01a14620-70cb-7000-9087-223339ad636c", "01a14620-70cb-7001-be11-62ba95687997");
+        as_app(&s, "CREATE TABLE notes (id UUID PRIMARY KEY DEFAULT uuid(), owner UUID NOT NULL, body VARCHAR(32))");
+        as_app(&s, &format!("INSERT INTO notes (owner, body) VALUES ('{a}', 'mine'), ('{b}', 'theirs')"));
+        as_app(&s, "CREATE ROLE member"); as_app(&s, "GRANT SELECT ON notes TO member");
+        as_app(&s, "CREATE POLICY own_notes ON notes FOR SELECT TO member USING (owner = SESSION.user_id)");
+        let mut m = Session::default(); s.assume(&mut m, &["member".into()], attrs(&[("user_id", Value::Text(a.into()))])).unwrap();
+        assert_eq!(rows(&s, &mut m, "SELECT body FROM notes"), vec!["Text(\"mine\")"]);
+        let mut bad = Session::default(); s.assume(&mut bad, &["member".into()], attrs(&[("user_id", Value::Text("nope".into()))])).unwrap();
+        assert!(s.exec_s(&mut bad, "SELECT body FROM notes", &[]).unwrap_err().contains("not a UUID"));
         drop(s); std::fs::remove_dir_all(&d).unwrap();
     }
 }
