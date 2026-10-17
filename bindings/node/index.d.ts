@@ -107,7 +107,7 @@ export interface OpenOptions {
   backup?: BackupOptions;
   /** Open as a read-only replica of a primary's directory on this host, or of the bucket a primary backs up to. */
   follow?: { dir?: string; bucket?: BackupOptions; poll?: DurationLike };
-  /** When the engine snapshots on its own: after this much new log (default '256MB') or after this long without writes (default '30s'). */
+  /** When the engine snapshots on its own: after this much new log (default '64MB') or after this long without writes (default '30s'). */
   snapshot?: { logBytes?: SizeLike; idleAfter?: DurationLike };
   /**
    * Doors for other processes: a Unix socket path, a TCP address, and `http`, the web console served from this process
