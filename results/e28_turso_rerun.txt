@@ -1,0 +1,41 @@
+=== E28: SQLite (system lib) vs Turso  vs ours, 1M rows, identical statements, each engine in its own process ===
+sqlite  load 1M rows (1000-row transactions)                 1.09 us/row
+sqlite  point read by id, 1 thread                           1.11 us
+sqlite  lookup by name (unique index), 1 thread              1.94 us
+sqlite  point reads, 8 threads                               5.00M/s
+sqlite  single-row inserts, synchronous=OFF (CPU cost)       9.33 us
+sqlite  single-row inserts, synchronous=FULL (durable)       573 us
+sqlite  transfer txns (2 reads + 2 updates), 4 threads, NORMAL 1974/s, 0 failed/retried
+sqlite  transfer txns (2 reads + 2 updates), 12 threads, NORMAL 1532/s, 0 failed/retried
+sqlite  invariant: sum of scores over the 1M rows            500138219.40
+sqlite  filtered count over the table                        26.9 ms (630219)
+sqlite  group by country                                     132.0 ms (20 groups)
+sqlite  memory (RSS) at the end                              17 MB
+sqlite  reopen + first read                                  0.19 ms
+turso   mode                                                 journal_mode=mvcc (BEGIN CONCURRENT available)
+turso   load 1M rows (1000-row transactions)                 10.28 us/row
+turso   point read by id, 1 thread                           2.33 us
+turso   lookup by name (unique index), 1 thread              4.56 us
+turso   point reads, 8 threads                               1.42M/s
+turso   single-row inserts, synchronous=OFF (CPU cost)       20.16 us
+turso   single-row inserts, synchronous=FULL (durable)       506 us
+turso   transfer txns (2 reads + 2 updates), 4 threads, BEGIN CONCURRENT 4320/s, 0 failed/retried
+turso   transfer txns (2 reads + 2 updates), 12 threads, BEGIN CONCURRENT 4985/s, 0 failed/retried
+turso   invariant: sum of scores over the 1M rows            500138219.40
+turso   filtered count over the table                        138.6 ms (630219)
+turso   group by country                                     286.5 ms (20 groups)
+turso   memory (RSS) at the end                              121 MB
+turso   reopen + first read                                  1.30 ms
+ours    load 1M rows (1000-row transactions)                 0.88 us/row
+ours    point read by id, 1 thread                           0.39 us
+ours    lookup by name (unique index), 1 thread              0.44 us
+ours    point reads, 8 threads                               17.54M/s
+ours    single-row inserts, not waiting for disk (CPU cost)  1.03 us
+ours    single-row inserts, durable (fsync each)             447 us
+ours    transfer txns (2 reads + 2 updates), 4 threads       857015/s, 16 failed/retried
+ours    transfer txns (2 reads + 2 updates), 12 threads      880868/s, 50 failed/retried
+ours    invariant: sum of scores over the 1M rows            500138219.40
+ours    filtered count over the table                        4.3 ms (Int(630219))
+ours    group by country                                     6.0 ms (20 groups)
+ours    memory (RSS) at the end                              250 MB
+ours    reopen + first read (from a snapshot)                0.29 ms

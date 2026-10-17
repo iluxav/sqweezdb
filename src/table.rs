@@ -200,11 +200,12 @@ pub struct LogState { pub buf: Vec<u8>, pub seq: u64, pub written: u64, pub dura
     pub running: bool, pub idle_exit: Option<std::time::Duration>, pub started: bool, pub threads: u8 }
 /// Writing and syncing are two threads: records reach the segment file (and so followers and change feeds) as soon as
 /// they are appended, independent of how long the current fsync takes; durability still comes from one fsync per batch.
-pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub cv_sync: Condvar, pub dir: PathBuf, /// live in-process change feeds; the memory ring is only kept while there is at least one
+pub struct GLog { pub st: Mutex<LogState>, pub cv_batch: Condvar, pub cv_durable: Condvar, pub cv_sync: Condvar, /// appenders waiting for room in a full buffer (kept apart from the many commits waiting on `cv_durable`)
+    pub cv_space: Condvar, pub dir: PathBuf, /// live in-process change feeds; the memory ring is only kept while there is at least one
     pub feeds: std::sync::atomic::AtomicUsize, /// signalled on an append while a reactor is waiting (never costs the writer otherwise)
     pub cv_feed: Condvar, pub feed_wake: std::sync::atomic::AtomicBool }
 impl GLog {
-    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 16), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0, cloud: 0, cloud_wait: false, cloud_kick: None, running: false, idle_exit: None, started: false, threads: 0 }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0), cv_feed: Condvar::new(), feed_wake: std::sync::atomic::AtomicBool::new(false) } }
+    pub fn new(dir: &Path) -> GLog { GLog { st: Mutex::new(LogState { buf: Vec::with_capacity(1 << 16), seq: 0, written: 0, durable: 0, stop: false, batches: 0, bytes: 0, rotate: false, segments: vec![], catalog: vec![], sync_fd: None, writer_done: false, recent: VecDeque::new(), recent_bytes: 0, cloud: 0, cloud_wait: false, cloud_kick: None, running: false, idle_exit: None, started: false, threads: 0 }), cv_batch: Condvar::new(), cv_durable: Condvar::new(), cv_sync: Condvar::new(), cv_space: Condvar::new(), dir: dir.to_path_buf(), feeds: std::sync::atomic::AtomicUsize::new(0), cv_feed: Condvar::new(), feed_wake: std::sync::atomic::AtomicBool::new(false) } }
     pub fn seg_path(&self, first: u64) -> PathBuf { Self::seg_path_in(&self.dir, first) }
     pub fn seg_path_in(dir: &Path, first: u64) -> PathBuf { dir.join(format!("log.{first:020}")) }
     pub fn list_segments(dir: &Path) -> Vec<u64> {
@@ -224,16 +225,16 @@ impl GLog {
         seq
     }
     /// record: [len u32][crc32c u32][seq u64][op u8][table u16][payload]
-    pub fn append(self: &Arc<Self>, op: u8, table: u16, payload: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record(&mut s, op, table, payload); let restart = s.started && !s.running; if restart { s.running = true; } drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
+    pub fn append(self: &Arc<Self>, op: u8, table: u16, payload: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_space.wait(s).unwrap(); } let seq = self.push_record(&mut s, op, table, payload); let restart = s.started && !s.running; if restart { s.running = true; } drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
     /// Start (or restart) the writer and syncer threads; with `idle_exit` set they leave after that much silence.
     pub fn spawn_threads(self: &Arc<Self>) { let a = self.clone(); std::thread::spawn(move || a.committer()); let b = self.clone(); std::thread::spawn(move || b.syncer()); }
     /// Append with a different payload for in-process feeds (a delete logs the key, feeds get the old row).
-    pub fn append_with_ring(self: &Arc<Self>, op: u8, table: u16, payload: &[u8], ring: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let seq = self.push_record2(&mut s, op, table, payload, Some(ring)); let restart = s.started && !s.running; if restart { s.running = true; } drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
+    pub fn append_with_ring(self: &Arc<Self>, op: u8, table: u16, payload: &[u8], ring: &[u8]) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_space.wait(s).unwrap(); } let seq = self.push_record2(&mut s, op, table, payload, Some(ring)); let restart = s.started && !s.running; if restart { s.running = true; } drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
     /// Block until a record after `last_seq` exists or the timeout passes; returns the current sequence.
     pub fn wait_feed(&self, last_seq: u64, timeout: std::time::Duration) -> u64 { let mut s = self.st.lock().unwrap(); if s.seq <= last_seq { self.feed_wake.store(true, Ordering::Release); let (g, _) = self.cv_feed.wait_timeout(s, timeout).unwrap(); s = g; self.feed_wake.store(false, Ordering::Release); } s.seq }
     /// A DDL or ACL statement: appended to the log and to the in-memory catalog under one lock, so a snapshot
     /// taken at sequence S sees exactly the statements with sequence <= S.
-    pub fn append_meta(self: &Arc<Self>, text: &str) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_durable.wait(s).unwrap(); } let restart = s.started && !s.running; if restart { s.running = true; } let seq = self.push_record(&mut s, OP_META, u16::MAX, text.as_bytes()); s.catalog.push(text.to_string()); drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
+    pub fn append_meta(self: &Arc<Self>, text: &str) -> u64 { let mut s = self.st.lock().unwrap(); while s.buf.len() >= LOG_BUF_CAP { self.cv_batch.notify_one(); s = self.cv_space.wait(s).unwrap(); } let restart = s.started && !s.running; if restart { s.running = true; } let seq = self.push_record(&mut s, OP_META, u16::MAX, text.as_bytes()); s.catalog.push(text.to_string()); drop(s); if restart { self.spawn_threads(); } self.cv_batch.notify_one(); seq }
     /// Records after `last` from the in-memory ring, up to `upto` (durable position in durable mode). `false` when the
     /// ring no longer reaches back to `last + 1`: the caller must read the files to catch up.
     pub fn recent_after(&self, last: u64, durable_only: bool) -> (Vec<(u64, u8, u16, Arc<[u8]>)>, bool) {
@@ -268,7 +269,7 @@ impl GLog {
               while s.buf.is_empty() && !s.stop && !s.rotate { match idle { Some(d) => { let (g, to) = self.cv_batch.wait_timeout(s, d).unwrap(); s = g; if to.timed_out() && s.buf.is_empty() && !s.stop && !s.rotate { break; } } None => { s = self.cv_batch.wait(s).unwrap(); } } }
               if s.buf.is_empty() && (s.stop || idle.is_some()) && !s.rotate { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.writer_done = true; s.running = false; s.threads -= 1; self.cv_sync.notify_all(); return; }  // the syncer exits only after this
               if s.buf.is_empty() { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.rotate = false; let nf = s.seq + 1; if s.segments.last() != Some(&nf) { s.segments.push(nf); } drop(s); f = self.open_segment(nf); let mut s = self.st.lock().unwrap(); s.sync_fd = Some(f.try_clone().unwrap()); continue; }
-              std::mem::swap(&mut local, &mut s.buf); seq_end = s.seq; s.batches += 1; s.bytes += local.len() as u64; self.cv_durable.notify_all(); }  // appenders waiting on back-pressure may continue
+              std::mem::swap(&mut local, &mut s.buf); seq_end = s.seq; s.batches += 1; s.bytes += local.len() as u64; self.cv_space.notify_all(); }  // appenders waiting on back-pressure may continue (not the commits waiting for durability)
             f.write_all(&local).unwrap(); local.clear(); if local.capacity() > 2 * LOG_BUF_CAP { local = Vec::with_capacity(1 << 22); }
             let mut s = self.st.lock().unwrap(); s.written = seq_end; self.cv_sync.notify_all();
             if s.rotate { while s.durable < s.written { s = self.cv_durable.wait(s).unwrap(); } s.rotate = false; s.segments.push(seq_end + 1); drop(s); f = self.open_segment(seq_end + 1); let mut s = self.st.lock().unwrap(); s.sync_fd = Some(f.try_clone().unwrap()); }
@@ -1317,5 +1318,32 @@ impl Database {
         for w in &txn.writes { if let TxnWrite::Update { table, row, old_key: Some(k), slot, .. } = w { if table.unique_key(row) != Some(&k[..]) { table.uniq_remove(k, *slot); } } }
         for w in &txn.writes { match w { TxnWrite::Insert { table, row, .. } => table.mirror_insert(row), TxnWrite::Update { table, row, .. } => table.mirror_update(row), TxnWrite::Delete { table, row, .. } => table.mirror_delete(table.pk_of(row)) } }
         Ok(seq)
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use std::time::Duration;
+    /// Back-pressure: an appender blocked on a full buffer is woken by the writer draining it (its own condvar, apart
+    /// from the commits waiting for durability), and nothing it appended is lost.
+    #[test] fn appenders_blocked_on_a_full_buffer_resume_when_the_writer_drains_it() {
+        let dir = std::env::temp_dir().join(format!("sqweezdb-logbp-{}", std::process::id())); let _ = fs::remove_dir_all(&dir); fs::create_dir_all(&dir).unwrap();
+        let log = Arc::new(GLog::new(&dir));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let l2 = log.clone();
+        let h = std::thread::spawn(move || { let payload = vec![7u8; 1 << 20]; for _ in 0..100 { l2.append(OP_INSERT, 1, &payload); } tx.send(()).unwrap(); });
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "with no writer running, 100 MB must block at the 32 MB cap");
+        { let mut s = log.st.lock().unwrap(); s.started = true; s.running = true; }
+        log.spawn_threads();
+        rx.recv_timeout(Duration::from_secs(30)).expect("the appender resumes once the writer drains the buffer");
+        h.join().unwrap();
+        let seq = log.st.lock().unwrap().seq; assert_eq!(seq, 100);
+        log.wait_durable(seq);
+        log.stop();
+        let bytes: u64 = GLog::list_segments(&dir).iter().map(|&f| fs::metadata(GLog::seg_path_in(&dir, f)).unwrap().len()).sum();
+        let (recs, _) = parse_glog(&fs::read(GLog::seg_path_in(&dir, GLog::list_segments(&dir)[0])).unwrap());
+        assert_eq!(recs.len(), 100, "all 100 records in the segment ({bytes} bytes)");
+        fs::remove_dir_all(&dir).ok();
     }
 }

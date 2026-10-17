@@ -13,7 +13,7 @@ in a library inside your process and a directory on disk.
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow)](#project-status)
 
-[Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Guides](#guides) · [Configuration](#configuration) · [SQL](#sql-reference) · [Performance](#performance) · [Building](#building-from-source)
+[Features](#features) · [Performance](#performance) · [Installation](#installation) · [Quick start](#quick-start) · [Guides](#guides) · [Configuration](#configuration) · [SQL](#sql-reference) · [Building](#building-from-source)
 
 </div>
 
@@ -33,8 +33,8 @@ schema changes without downtime, and backup to any S3-compatible bucket.
 
 | Capability | What you get |
 |---|---|
-| **Concurrent writers** | Commits share one append-only log with group commit. 256 writers sustain about 200,000 durable commits per second, where SQLite serializes writers at about 2,000. |
-| **Lock-free reads** | Readers never take a lock. A point read costs about 0.4 µs in-process, and 4 threads read 21 million rows per second while writers run. |
+| **Concurrent writers** | Commits share one append-only log with group commit, so concurrent writers share each fsync: 256 writers make 130,000 to 165,000 durable commits per second, where SQLite stays near 2,300. Transactions conflict per row, not per database. |
+| **Lock-free reads** | Readers never take a lock. A point read costs about 0.4 µs in-process, and 8 threads make 17.5 million point reads per second. |
 | **Strict types** | `INT`, `DOUBLE`, `BOOL`, `TEXT(n)`, `BYTES(n)`, `TIMESTAMP`, `UUID`. A value of the wrong type is rejected, never stored. |
 | **Keys and ids** | Automatic integer ids that are never reused, UUID primary keys (time-ordered v7 or random v4), `DEFAULT now()`, and `INSERT … RETURNING`. |
 | **Row-level security** | Roles, grants and row policies enforced on every query, write and subscription. Your app passes who is asking on each request. |
@@ -44,6 +44,54 @@ schema changes without downtime, and backup to any S3-compatible bucket.
 | **Backup and replication** | Continuous backup to S3-compatible storage, compressed and encrypted; point-in-time restore; read-only followers. |
 | **Fast restart** | The snapshot is the table image and is memory-mapped, not loaded. After a snapshot, a million-row table reopens in under a millisecond; each secondary index adds about 30 ms per million rows. |
 | **Tooling** | A `sqweezdb` command with a server, a SQL shell and a web console, plus bindings for Node, Python, Go, C and Rust. |
+
+## Performance
+
+The same statements and the same data on each engine, 1 million rows, each engine in its own process:
+SQLite 3.53 (the system library, WAL mode), Turso 0.8.3 (its MVCC mode with `BEGIN CONCURRENT`) and
+sqweezdb. All three returned identical results, to the cent and to the row.
+
+| Workload | SQLite | Turso | sqweezdb |
+|---|---:|---:|---:|
+| Durable commits per second, 1 writer | 2,197–2,220 | 2,288–2,362 | 2,287–2,351 |
+| Durable commits per second, 64 writers | 2,264–2,306 | 53,017–59,845 | 50,823–55,315 |
+| Durable commits per second, 256 writers | 2,285–2,326 | 106,866–118,324 | **131,874–165,783** |
+| Transactions per second, 12 threads (2 reads + 2 updates each) | 1,532 | 4,985 | **880,868** |
+| Bulk load, 1,000-row transactions | 1.09 µs/row | 10.28 µs/row | **0.88 µs/row** |
+| Single-row insert, CPU cost | 9.33 µs | 20.16 µs | **1.03 µs** |
+| Point read by primary key | 1.11 µs | 2.33 µs | **0.39 µs** |
+| Lookup by a unique column | 1.94 µs | 4.56 µs | **0.44 µs** |
+| Point reads per second, 8 threads | 5.0M | 1.4M | **17.5M** |
+| Filtered count over 1M rows | 26.9 ms | 138.6 ms | **4.3 ms** |
+| `GROUP BY` over 1M rows, 20 groups | 132 ms | 287 ms | **6.0 ms** |
+| Reopen and first read | **0.19 ms** | 1.30 ms | 0.29 ms |
+| Resident memory at the end | **17 MB** | 121 MB | 250 MB |
+
+The durable rows insert single rows into a fresh table and wait for an fsync on every engine, so one
+writer is bound by the disk on all three; their ranges come from two runs with the engines in opposite
+orders. The transaction row does not wait
+for the disk. sqweezdb keeps tables in memory, so it uses the most memory
+after a large load; after a restart that maps the snapshot, it owns about 2 MB and the operating
+system's page cache holds the rest.
+
+Compared with the tools usually paired with SQLite:
+
+| Workload | SQLite with its usual tool | sqweezdb |
+|---|---:|---:|
+| Node: point read returned as an object | 1.38 µs (better-sqlite3) | **0.98 µs** |
+| Node: 1,000 rows returned as objects | 111 µs (better-sqlite3) | **66 µs** |
+| Node: autocommit insert | 8.7 µs (better-sqlite3) | **1.07 µs** |
+| 1M rows in a backup bucket | 43 MB (Litestream) | **6 MB** |
+| Insert then delete 3M rows, one at a time | 614 s | **4.1 s** |
+
+Where the others are ahead or even: Turso matches sqweezdb on durable commits up to about 64 writers;
+SQLite reopens slightly faster, uses far less memory after a load, bulk-loads faster one row
+per call through a language binding, and finishes `ALTER TABLE` changes that only touch metadata
+instantly, where sqweezdb copies the table in the background.
+
+Measured on one machine, an AMD Ryzen 5 9600X with NVMe storage and btrfs; the numbers describe that
+machine, not yours. Every benchmark is a program in [`src/bin/`](src/bin/) that you can run, and its
+raw output is in [`results/`](results/).
 
 ## Installation
 
@@ -516,29 +564,6 @@ Every binding reports errors with a stable code. In Node it is `err.code` on a `
 | `PATH` | The path is a file, or a directory that isn't a database. |
 | `CONFIG` | An invalid or unknown option. |
 | `ERROR` | Anything else. |
-
-## Performance
-
-Measured on one machine (AMD Ryzen 5 9600X, NVMe, btrfs) against the system SQLite 3.53. The numbers
-describe that machine, not yours. Raw outputs are in [`results/`](results/), and every benchmark is a
-program in [`src/bin/`](src/bin/) you can run yourself.
-
-| Workload | SQLite | sqweezdb |
-|---|---|---|
-| Durable commits per second, 256 writers | about 2,000 | about 200,000 |
-| Point read by primary key, in-process | 0.89 µs | 0.37 µs |
-| Reads per second while writes run | 4.4M on 8 threads | 21M on 4 threads |
-| `GROUP BY` over 1M rows, 20 groups | 121 ms | 2.5 ms |
-| Restart with 1M rows | 0.5 ms | 1 ms |
-| Insert then delete 3M rows, one at a time | 614 s | 4.1 s |
-| 1M rows in a backup bucket | 43 MB (Litestream) | 6 MB |
-| Node: point read as an object | 1.38 µs (better-sqlite3) | 0.98 µs |
-| Node: 1,000 rows as objects | 111 µs (better-sqlite3) | 66 µs |
-| Node: autocommit insert | 8.7 µs (better-sqlite3) | 1.07 µs |
-
-SQLite is still faster at bulk loading one row per call through a language binding, at a cold restart
-by about half a millisecond, at `ALTER TABLE` changes that only touch metadata, and at key-only lookups
-under a hard memory cap.
 
 ## How it works
 

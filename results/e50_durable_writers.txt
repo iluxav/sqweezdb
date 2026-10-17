@@ -1,0 +1,16 @@
+=== E50: durable single-row commits, many writers, 3 s per point (fsync per commit on every engine) ===
+=== E50: durable single-row commits, many writers, 3 s per point (fsync per commit on every engine) ===
+sqlite     1 writers:      2167 durable commits/s  (6501 acknowledged, 0 retried, 6501 rows: exact)
+sqlite    16 writers:      2283 durable commits/s  (6849 acknowledged, 0 retried, 6849 rows: exact)
+sqlite    64 writers:      2310 durable commits/s  (6931 acknowledged, 0 retried, 6931 rows: exact)
+sqlite   256 writers:      2353 durable commits/s  (7059 acknowledged, 0 retried, 7059 rows: exact)
+=== E50: durable single-row commits, many writers, 3 s per point (fsync per commit on every engine) ===
+turso      1 writers:      2292 durable commits/s  (6875 acknowledged, 0 retried, 6875 rows: exact)
+turso     16 writers:     16808 durable commits/s  (50425 acknowledged, 0 retried, 50425 rows: exact)
+turso     64 writers:     61426 durable commits/s  (184277 acknowledged, 0 retried, 184277 rows: exact)
+turso    256 writers:    117970 durable commits/s  (353910 acknowledged, 0 retried, 353910 rows: exact)
+=== E50: durable single-row commits, many writers, 3 s per point (fsync per commit on every engine) ===
+sqweezdb   1 writers:      2315 durable commits/s  (6945 acknowledged, 0 retried, 6945 rows: exact)
+sqweezdb  16 writers:     16419 durable commits/s  (49256 acknowledged, 0 retried, 49256 rows: exact)
+sqweezdb  64 writers:     53470 durable commits/s  (160410 acknowledged, 0 retried, 160410 rows: exact)
+sqweezdb 256 writers:     64787 durable commits/s  (194362 acknowledged, 0 retried, 194362 rows: exact)
